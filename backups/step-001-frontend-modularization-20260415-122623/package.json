@@ -1,0 +1,20 @@
+{
+  "name": "noval",
+  "version": "0.1.0",
+  "description": "Desktop novel generator app",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "keywords": [
+    "novel",
+    "generator",
+    "desktop",
+    "electron"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^36.1.0"
+  }
+}
