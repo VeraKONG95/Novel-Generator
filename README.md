@@ -1,39 +1,12 @@
-# Noval
+# Noval / Pi 小说生成器
 
-当前仓库是一个混合工程：
+Noval 是一个中文、本地单人使用的长篇小说创作应用。界面采用三栏结构：左侧是可以连续讨论的多轮对话，中间是唯一创作入口，右侧是可收起的真实项目文件。
 
-- Electron 主进程与本地能力层：项目保存、自动保存、模型调用、记忆整理、导出
-- React + Vite 前端：从 `/Users/vera/Noval` 迁移进来的设计前端
-
-这次迁移的目标不是保留两套互相独立的项目，而是把原先的设计前端真正并入当前 Electron 应用里。
-
-## 当前结构
-
-```text
-noval/
-├── main.js                  # Electron 主进程
-├── preload.js               # 渲染层 API bridge
-├── services/
-│   ├── project-schema.js    # 项目 schema / 迁移
-│   └── story-engine.js      # 生成、改写、记忆逻辑
-├── src/
-│   ├── main.tsx             # React 前端入口（迁移自 /Users/vera/Noval）
-│   ├── app/                 # React 页面、组件、上下文、桥接工具
-│   ├── styles/              # 设计样式
-│   ├── app.mjs              # 旧版原生前端入口，作为迁移期保留
-│   └── index.html           # 旧版 fallback 页面
-├── index.html               # Vite / React 入口
-├── vite.config.mjs
-├── postcss.config.mjs
-└── backups/                 # 每一步开发前的手工备份
-```
-
-## 启动
-
-先安装依赖：
+## 使用方式
 
 ```bash
 npm install
+npm start
 ```
 
 开发模式：
@@ -42,283 +15,92 @@ npm install
 npm run dev
 ```
 
-这会同时启动：
+默认通过 OpenRouter 使用 `deepseek/deepseek-v4-flash`。首次使用先打开“模型设置”，只需填写 OpenRouter API Key；应用会检查连接、中文输出、连续输出、受控动作和停止任务，检查未通过时不会开放创作任务。API Key 只保存在系统的本机应用配置目录，不会写入代码仓库或小说项目。
 
-- Vite 开发服务器
-- Electron 桌面壳
+首页提供三个主要入口：
 
-生产式本地启动：
+- 新建小说：填写最少的故事信息，进入项目后继续完成创作章程访谈。
+- 导入已有小说：支持纯文本与 Markdown，确认人物、时间线、冲突、伏笔和文风档案前不能续写。
+- 打开创作空间：打开已经存在的文件夹项目。
 
-```bash
-npm start
+模型生成的蓝图、章节、人物、阶段计划和改写结果都会先作为文件改动清单出现在对话中。作者可以确认写入、继续修改或拒绝；一次候选涉及的多个文件会统一写入，遇到外部修改时全部暂停。模型失败时会显示真实错误，不会用模板内容冒充成功。
+
+## 创作空间
+
+一个小说项目是一个普通文件夹，人物、蓝图、文风、章节和记忆都以这些可见文件为准。`AGENTS.md` 中自动保留一段项目资料索引，方便 AI 按需读取：
+
+```text
+小说名/
+├── AGENTS.md
+├── outline/
+│   ├── book.md
+│   ├── stages/current.md
+│   └── chapters/*.md
+├── characters/*.md
+├── chapters/*.md
+├── memory/
+│   ├── facts.json
+│   ├── timeline.json
+│   ├── character-states.json
+│   ├── foreshadowing.json
+│   └── change-log.jsonl
+└── .noval/
+    ├── project.json
+    ├── index.json
+    └── tasks/*
 ```
 
-这个命令会先执行 `vite build`，再让 Electron 加载 `dist/index.html`。
+应用会监听外部文件变化。没有应用内修改时自动刷新；两边同时发生修改时暂停保存，并提供采用外部版本、保留应用内版本和对照合并三种选择。
 
-## Electron 加载规则
+`.noval` 目录只保存项目身份、对话、运行状态和文件检查信息，不再保存一份完整作品副本。打开旧版创作空间时会自动转换，已存在的普通文件始终优先。
 
-Electron 会按下面的顺序寻找前端入口：
+旧版单文件 JSON 项目可以从首页迁移。原文件不会被删除；转换会先在临时位置完成并检查，成功后才建立新项目。
 
-1. 如果存在 `VITE_DEV_SERVER_URL`，加载开发服务器
-2. 否则如果存在 `dist/index.html`，加载构建产物
-3. 否则回退到旧版 `src/index.html`
+## Pi 任务
 
-## 迁移说明
+应用固定支持这些任务：
 
-Step 11 做了这次前端迁移：
+- 完善创作章程
+- 整理导入作品档案
+- 设计人物
+- 生成全书蓝图
+- 规划当前阶段
+- 规划近期章节
+- 写下一章
+- 改写指定内容
+- 整理文风说明
+- 独立评审
+- 重新整理故事记忆
+- 项目问答
 
-- 把 `/Users/vera/Noval` 的 React/Vite 文件迁入当前仓库
-- 保留现有 Electron 主进程与服务层
-- 改为让 Electron 加载 React 前端
-- 把 React 路由切到 hash 模式，兼容 Electron 的 `file://` 场景
+同一时间只运行一个任务。运行期间可以停止；停止不会修改正式作品。任务、过程事件、候选稿和错误都会写入项目，应用意外关闭后可以重新执行或放弃中断任务。
 
-备份目录：
+Pi 后台只接收应用准备好的当前项目资料，不具备命令执行、任意文件访问或主动联网工具。当前固定依赖 `@earendil-works/pi-agent-core` 与 `@earendil-works/pi-ai` 的 `0.80.6` 版本。
 
-`backups/step-011-react-frontend-migration-20260415-142230`
+## 检查
 
-## 当前状态
+运行完整交付检查：
 
-代码层面已经完成：
+```bash
+npm run check
+```
 
-- React/Vite 前端文件迁移进仓库
-- Electron 与 React 前端加载链打通
-- 现有本地服务层继续保留
+它会依次完成文件检查、类型检查、自动测试和生产构建。自动测试覆盖：
 
-但要说明清楚：
+- 创作空间创建、迁移基础、外部修改、冲突阻止与事务恢复
+- 项目路径边界、索引损坏重建、可追溯记忆记录
+- Pi 受控动作、错误提交、真实模型失败且无模板回退
+- 任务停止、连续事件写入、访谈继续回答、意外中断恢复
+- 300 章、约 150 万字项目的打开与检索性能
 
-- 迁移后的 React 前端目前还是以原设计稿的页面和 mock 数据为主
-- 我们之前在旧版原生前端里做好的那套完整写作工作流，还没有逐项迁进这套 React 界面
+单独运行：
 
-所以当前更准确的状态是：
+```bash
+npm run typecheck
+npm test
+npm run build
+```
 
-- 前端设计迁进来了
-- Electron 壳也能加载它
-- 业务能力层还在
-- 但“React 界面完全接管旧功能”还没做完
+## 当前产品边界
 
-下一步合理方向是：
-
-1. 先把 React 首页 / 项目页接上 `window.novalAPI`
-2. 再逐步替换掉旧版 `app.mjs` 这套原生前端
-
-## Step 12
-
-Step 12 已经把 React 首页和项目页接上了当前 Electron 项目能力：
-
-- 首页不再依赖 `MOCK_PROJECTS`，改为读取当前项目和最近项目列表
-- 新建项目会创建真实的项目 schema，而不是只建一个前端卡片
-- 支持通过文件对话框导入项目，也支持按最近项目路径直接打开
-- 项目页已经接上真实的角色、世界观、大纲、章节数据
-- 项目页支持保存项目、自动保存、导出全文
-- “生成下一章”已经走现有的 Electron 生成与章节分析链路
-
-这一轮新增的 React 侧关键文件：
-
-- `src/app/context/ProjectContext.tsx`
-- `src/app/lib/projectBridge.ts`
-- `src/app/types/noval-api.d.ts`
-
-备份目录：
-
-`backups/step-012-react-api-bridge-20260415-143900`
-
-## Step 13
-
-Step 13 补上了 React 版项目页里最关键的蓝图入口：
-
-- 右侧“大纲”区域新增“生成蓝图 / 重新生成蓝图”
-- 直接复用现有 `generation:blueprint` IPC 和主进程生成服务
-- 生成完成后会自动刷新当前项目的蓝图数据，并直接打开大纲文档
-- 这样新建项目后，不需要回退旧版界面，也可以继续跑完整的“蓝图 -> 章节”链路
-
-备份目录：
-
-`backups/step-013-react-blueprint-generation-20260415-160727`
-
-## Step 14
-
-Step 14 把 React 版的连续写作链路又往前推了一截：
-
-- 支持在中间创作区基于当前章节继续创作，右侧成品区不再提供单独的“续写当前章”按钮
-- 手动编辑章节后，Pin 回项目时会自动重做章节分析
-- 自动把最新摘要和记忆项同步回项目 memory
-- 新增手动“刷新记忆”入口，方便在批量修改后重新整理全局记忆
-
-这一轮主要改动：
-
-- `src/app/pages/ProjectPage.tsx`
-- `src/app/components/project/RightPanel.tsx`
-- `src/app/components/project/MiddlePanel.tsx`
-
-备份目录：
-
-`backups/step-014-react-continuation-memory-20260415-160959`
-
-## Step 15
-
-Step 15 修复了 `npm start` 时 Electron 生产构建白屏的问题：
-
-- 根因是 `vite build` 产出的 `dist/index.html` 默认使用 `/assets/...` 绝对路径
-- Electron 通过 `file://.../dist/index.html` 加载时，绝对路径会指向系统根目录，导致脚本和样式都加载失败
-- 现在 `vite.config.mjs` 已设置 `base: "./"`，构建产物会改成相对资源路径
-
-备份目录：
-
-`backups/step-015-electron-blank-window-fix-20260415-161613`
-
-## Step 16
-
-Step 16 把 React 版缺失的“模型设置”界面补回来了：
-
-- 首页和项目页都新增了“模型设置 / 配置 API”入口
-- 支持查看和保存 `Provider / Base URL / Model / API Key`
-- React 侧已经接上 `loadSettings` 和 `saveSettings`
-- 设置保存在本机，不写入项目文件
-
-这一轮新增和修改：
-
-- `src/app/components/modals/SettingsModal.tsx`
-- `src/app/context/ProjectContext.tsx`
-- `src/app/pages/HomePage.tsx`
-- `src/app/pages/ProjectPage.tsx`
-
-备份目录：
-
-`backups/step-016-react-settings-ui-20260415-164329`
-
-## Step 17
-
-Step 17 完成了项目页导出入口的收敛和导出选择弹层：
-
-- 现在项目页只保留右上角一个导出入口
-- 右下角成品区里的重复导出按钮已经移除
-- 点击右上角导出后，会弹出选择界面
-- 用户可以自由选择：
-  - 是否导出大纲
-  - 哪几个章节要导出
-  - 一键选择全文
-
-这一轮新增和修改：
-
-- `src/app/components/modals/ExportModal.tsx`
-- `src/app/pages/ProjectPage.tsx`
-- `src/app/components/project/RightPanel.tsx`
-- `src/app/lib/projectBridge.ts`
-
-备份目录：
-
-`backups/step-017-react-export-selector-20260415-165155`
-
-## Step 18
-
-Step 18 把项目页的修改流程切成了“成品区只展示，修改走左侧修改类对话，Pin 从 AI 气泡下方写回”：
-
-- 右侧大纲和章节目录继续作为成品区入口
-- 中间区打开文档时只做成品预览，不再直接编辑和顶部 Pin
-- 针对大纲或章节输入修改要求时，会创建或继续一条“修改类对话”
-- 修改类对话已经接上真实 `rewrite:text` 链路
-- AI 返回的修改稿会出现在对话气泡里
-- `Pin` 现在放在 AI 修改气泡下方，点击后才会写回右侧成品区
-- 章节被 Pin 后会继续自动更新摘要和记忆
-
-这一轮主要修改：
-
-- `src/app/pages/ProjectPage.tsx`
-- `src/app/components/project/MiddlePanel.tsx`
-- `src/app/components/project/LeftPanel.tsx`
-- `src/app/types/index.ts`
-
-备份目录：
-
-`backups/step-018-react-modification-pin-flow-20260415-165800`
-
-## Step 19
-
-Step 19 进一步收敛了右侧成品区的操作，只保留“成品查看”和必要的生成入口：
-
-- 移除了右侧成品区顶部的“续写当前章 / 续写第一章”按钮
-- 继续创作仍然保留在中间创作链路里，不影响章节续写能力
-- 这样右侧区域会更明确地承担“成品区”角色，避免和中间创作区职责重叠
-
-这一轮主要修改：
-
-- `src/app/components/project/RightPanel.tsx`
-- `src/app/pages/ProjectPage.tsx`
-
-备份目录：
-
-`backups/step-019-remove-rightpanel-continue-20260415-170830`
-
-## Step 20
-
-Step 20 是一轮小型热修复，处理了 Step 19 带来的运行时报错：
-
-- 修复了右侧章节区“生成第 N 章”按钮里的 `PlusIcon is not defined`
-- 根因是移除“续写当前章”按钮时误删了 `PlusIcon` 的 import，而章节生成入口仍在使用它
-- 这一步只修运行时错误，不改交互设计
-
-这一轮主要修改：
-
-- `src/app/components/project/RightPanel.tsx`
-
-备份目录：
-
-`backups/step-020-plusicon-hotfix-20260415-171127`
-
-## Step 21
-
-Step 21 修复了“新建项目后，上一份未保存项目被顶掉”的问题：
-
-- 新建项目前，会先把当前未保存项目自动暂存为草稿
-- 打开别的项目或从草稿切换时，也会先保护当前未保存内容
-- 首页现在会显示“草稿箱”项目卡片，可以重新打开、重命名、移除
-- 草稿保存为正式项目文件后，会自动从草稿箱移除，避免重复
-
-这一轮主要修改：
-
-- `main.js`
-- `preload.js`
-- `src/app/context/ProjectContext.tsx`
-- `src/app/pages/HomePage.tsx`
-- `src/app/lib/projectBridge.ts`
-- `src/app/types/index.ts`
-- `src/app/types/noval-api.d.ts`
-
-备份目录：
-
-`backups/step-021-draft-preservation-20260415-171405`
-
-## Step 22
-
-Step 22 调整了首页入口文案，让首页更符合“从本地引入已有项目”的语义：
-
-- 首页“打开项目”按钮改为“导入项目”
-- 加载态文案同步改为“导入中...”
-- 失败提示同步改为“导入项目失败”
-
-这一轮主要修改：
-
-- `src/app/pages/HomePage.tsx`
-- `README.md`
-
-备份目录：
-
-`backups/step-022-home-import-label-20260415-172248`
-
-## Step 23
-
-Step 23 继续优化了首页项目管理体验，把首页卡片按项目状态分区展示：
-
-- 首页项目列表拆成“当前草稿 / 草稿箱 / 最近项目”三个区块
-- 当前正在编辑但未保存为文件的项目，会单独显示在“当前草稿”
-- 自动暂存下来的未保存项目，会收进“草稿箱”
-- 已导入或已保存过的项目，统一显示在“最近项目”
-
-这一轮主要修改：
-
-- `src/app/pages/HomePage.tsx`
-- `README.md`
-
-备份目录：
-
-`backups/step-023-home-sections-20260415-173052`
+首版只支持中文、本地单人、单 Pi 和一条正式故事线。暂不包含云同步、多人协作、应用内版本管理、主动联网研究、插件系统或自动独立评审。

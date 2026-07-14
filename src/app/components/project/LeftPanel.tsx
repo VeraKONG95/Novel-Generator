@@ -1,11 +1,12 @@
 import { useState } from 'react';
-import { MessageCircleIcon, PencilIcon, SearchIcon, ChevronDownIcon, ChevronRightIcon } from 'lucide-react';
+import { MessageCircleIcon, PencilIcon, SearchIcon, ChevronDownIcon, ChevronRightIcon, PlusIcon } from 'lucide-react';
 import { Conversation } from '../../types';
 
 interface LeftPanelProps {
   conversations: Conversation[];
   selectedConvId: string | null;
   onSelectConversation: (id: string) => void;
+  onNewConversation: () => void;
 }
 
 function formatTime(ts: string) {
@@ -39,7 +40,7 @@ function groupConversations(conversations: Conversation[]) {
   return { today, older };
 }
 
-export function LeftPanel({ conversations, selectedConvId, onSelectConversation }: LeftPanelProps) {
+export function LeftPanel({ conversations, selectedConvId, onSelectConversation, onNewConversation }: LeftPanelProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [showSearch, setShowSearch] = useState(false);
   const [olderExpanded, setOlderExpanded] = useState(true);
@@ -57,6 +58,24 @@ export function LeftPanel({ conversations, selectedConvId, onSelectConversation 
   const renderConvItem = (conv: Conversation) => {
     const isSelected = selectedConvId === conv.id;
     const isMod = conv.type === 'modification';
+    const isTask = conv.type === 'task' || conv.type === 'review';
+    const statusText = conv.status === 'awaiting_confirmation'
+      ? '等待确认'
+      : conv.status === 'completed'
+        ? '已完成'
+        : conv.status === 'failed'
+          ? '失败'
+          : conv.status === 'stopped'
+            ? '已停止'
+            : conv.status === 'interrupted'
+              ? '意外中断'
+              : conv.status === 'rejected'
+                ? '已拒绝'
+                : conv.status === 'abandoned'
+                  ? '已放弃'
+                : conv.status
+                  ? '处理中'
+                  : '';
 
     return (
       <button
@@ -69,7 +88,7 @@ export function LeftPanel({ conversations, selectedConvId, onSelectConversation 
               ? '#E8EFFF'
               : '#F0F0F5'
             : 'transparent',
-          borderLeft: isMod ? `3px solid ${isSelected ? '#4A7CF7' : '#C5D3F7'}` : '3px solid transparent',
+          borderLeft: isMod || isTask ? `3px solid ${isSelected ? '#4A7CF7' : '#C5D3F7'}` : '3px solid transparent',
           marginLeft: '-3px',
         }}
         onMouseEnter={(e) => {
@@ -89,10 +108,10 @@ export function LeftPanel({ conversations, selectedConvId, onSelectConversation 
             style={{
               width: '20px',
               height: '20px',
-              background: isMod ? '#4A7CF7' : '#D0D0DC',
+              background: isMod || isTask ? '#4A7CF7' : '#D0D0DC',
             }}
           >
-            {isMod ? (
+            {isMod || isTask ? (
               <PencilIcon size={10} color="#FFFFFF" />
             ) : (
               <MessageCircleIcon size={10} color="#FFFFFF" />
@@ -113,12 +132,12 @@ export function LeftPanel({ conversations, selectedConvId, onSelectConversation 
             <p className="text-xs mt-0.5 truncate" style={{ color: '#8B8B9E' }}>
               {conv.preview}
             </p>
-            {isMod && (
+            {(isMod || isTask) && (
               <span
                 className="inline-block mt-1 px-1.5 py-0.5 rounded text-xs"
                 style={{ background: '#EEF3FF', color: '#4A7CF7' }}
               >
-                修改类
+                {isMod ? `修改任务${statusText ? ` · ${statusText}` : ''}` : conv.type === 'review' ? `独立评审${statusText ? ` · ${statusText}` : ''}` : statusText || 'AI 处理中'}
               </span>
             )}
           </div>
@@ -135,7 +154,7 @@ export function LeftPanel({ conversations, selectedConvId, onSelectConversation 
       {/* Panel header */}
       <div className="flex-shrink-0 px-4 py-3.5" style={{ borderBottom: '1px solid #EAEAEA' }}>
         <div className="flex items-center justify-between mb-0">
-          <span style={{ color: '#1A1A2E' }} className="text-sm">对话记录</span>
+          <span style={{ color: '#1A1A2E' }} className="text-sm">对话</span>
           <div className="flex items-center gap-1">
             <span
               className="text-xs px-1.5 py-0.5 rounded"
@@ -145,6 +164,7 @@ export function LeftPanel({ conversations, selectedConvId, onSelectConversation 
             </span>
             <button
               onClick={() => setShowSearch(!showSearch)}
+              aria-label={showSearch ? '关闭对话搜索' : '搜索对话记录'}
               className="p-1.5 rounded-lg transition-colors"
               style={{ color: '#8B8B9E' }}
               onMouseEnter={(e) => (e.currentTarget as HTMLElement).style.background = '#EAEAEA'}
@@ -154,6 +174,15 @@ export function LeftPanel({ conversations, selectedConvId, onSelectConversation 
             </button>
           </div>
         </div>
+
+        <button
+          onClick={onNewConversation}
+          className="mt-3 w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs"
+          style={{ background: '#1A1A2E', color: '#FFFFFF' }}
+        >
+          <PlusIcon size={13} />
+          新建对话
+        </button>
 
         {/* Search input */}
         {showSearch && (
@@ -174,18 +203,6 @@ export function LeftPanel({ conversations, selectedConvId, onSelectConversation 
             />
           </div>
         )}
-      </div>
-
-      {/* Legend */}
-      <div className="flex-shrink-0 flex items-center gap-3 px-4 py-2" style={{ borderBottom: '1px solid #EAEAEA' }}>
-        <div className="flex items-center gap-1.5">
-          <div className="w-2 h-2 rounded-full" style={{ background: '#D0D0DC' }} />
-          <span style={{ color: '#9999B3' }} className="text-xs">通用查询</span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <div className="w-2 h-2 rounded-full" style={{ background: '#4A7CF7' }} />
-          <span style={{ color: '#9999B3' }} className="text-xs">修改类</span>
-        </div>
       </div>
 
       {/* Conversations list */}

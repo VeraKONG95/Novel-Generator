@@ -16,6 +16,7 @@ import { SettingsModal } from '../components/modals/SettingsModal';
 import { useProjectContext } from '../context/ProjectContext';
 import { buildHomeProjects } from '../lib/projectBridge';
 import { Project } from '../types';
+import { useDialogAccessibility } from '../hooks/useDialogAccessibility';
 
 export function HomePage() {
   const navigate = useNavigate();
@@ -28,7 +29,9 @@ export function HomePage() {
     createProject,
     discardCurrentProject,
     updateCurrentProject,
-    openProject,
+    openWorkspace,
+    importLegacyProject,
+    importNovel,
     openProjectFromPath,
     openDraftProject,
     saveSettings,
@@ -41,9 +44,11 @@ export function HomePage() {
 
   const projects = buildHomeProjects(currentProject, currentPath, recentProjects, draftProjects);
   const [showNewModal, setShowNewModal] = useState(false);
+  const newProjectDialogRef = useDialogAccessibility<HTMLFormElement>(() => setShowNewModal(false), showNewModal);
   const [newTitle, setNewTitle] = useState('');
-  const [newGenre, setNewGenre] = useState('');
-  const [newDesc, setNewDesc] = useState('');
+  const [newWorkspacePath, setNewWorkspacePath] = useState('');
+  const [isChoosingWorkspacePath, setIsChoosingWorkspacePath] = useState(false);
+  const [isCreatingProject, setIsCreatingProject] = useState(false);
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
@@ -60,22 +65,39 @@ export function HomePage() {
   };
 
   const handleCreate = async () => {
-    if (!newTitle.trim()) return;
-    const project = await createProject({
-      title: newTitle.trim(),
-      genre: newGenre.trim(),
-      description: newDesc.trim()
-    });
-    setNewTitle('');
-    setNewGenre('');
-    setNewDesc('');
-    setShowNewModal(false);
-    navigate(`/project/${project.id}`);
+    if (!newTitle.trim() || !newWorkspacePath.trim() || isCreatingProject) return;
+    setIsCreatingProject(true);
+    try {
+      const project = await createProject(newWorkspacePath.trim(), { title: newTitle.trim() });
+      if (!project) return;
+      setNewTitle('');
+      setNewWorkspacePath('');
+      setShowNewModal(false);
+      navigate(`/project/${project.id}`);
+    } catch (error) {
+      showNotification(`创建失败：${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    } finally {
+      setIsCreatingProject(false);
+    }
+  };
+
+  const handleChooseWorkspacePath = async () => {
+    if (!window.novalAPI?.chooseWorkspaceCreatePath || isChoosingWorkspacePath) return;
+    setIsChoosingWorkspacePath(true);
+    try {
+      const result = await window.novalAPI.chooseWorkspaceCreatePath();
+      if (result?.filePath) setNewWorkspacePath(result.filePath);
+      if (result?.error) showNotification(`选择地址失败：${result.error}`, 'error');
+    } catch (error) {
+      showNotification(`选择地址失败：${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    } finally {
+      setIsChoosingWorkspacePath(false);
+    }
   };
 
   const handleOpenDialog = async () => {
     setBusyId('dialog');
-    const result = await openProject();
+    const result = await openWorkspace();
     setBusyId(null);
     if (result.ok && result.data) {
       navigate(`/project/${result.data.id}`);
@@ -83,7 +105,31 @@ export function HomePage() {
       return;
     }
     if (result.error) {
-      showNotification(`导入项目失败：${result.error}`, 'error');
+      showNotification(`打开创作空间失败：${result.error}`, 'error');
+    }
+  };
+
+  const handleImportLegacy = async () => {
+    setBusyId('legacy');
+    const result = await importLegacyProject();
+    setBusyId(null);
+    if (result.ok && result.data) {
+      navigate(`/project/${result.data.id}`);
+      showNotification('旧项目已迁移，原文件保持不变');
+    } else if (result.error) {
+      showNotification(`迁移失败：${result.error}`, 'error');
+    }
+  };
+
+  const handleImportNovel = async () => {
+    setBusyId('novel');
+    const result = await importNovel({ title: `导入小说-${new Date().toLocaleDateString('zh-CN')}` });
+    setBusyId(null);
+    if (result.ok && result.data) {
+      navigate(`/project/${result.data.id}`);
+      showNotification('正文已导入，请先完成读稿建档');
+    } else if (result.error) {
+      showNotification(`导入小说失败：${result.error}`, 'error');
     }
   };
 
@@ -227,7 +273,7 @@ export function HomePage() {
                 <button onClick={() => handleRename(project)} className="p-1 rounded hover:bg-green-50">
                   <CheckIcon size={14} color="#22C55E" />
                 </button>
-                <button onClick={() => setRenamingId(null)} className="p-1 rounded hover:bg-red-50">
+                <button aria-label="取消重命名" onClick={() => setRenamingId(null)} className="p-1 rounded hover:bg-red-50">
                   <XIcon size={14} color="#EF4444" />
                 </button>
               </div>
@@ -418,7 +464,15 @@ export function HomePage() {
               style={{ border: '1px solid #E0E0EA', color: '#6E6E8A', background: '#FFFFFF' }}
             >
               <FolderOpenIcon size={15} />
-              <span className="text-sm">{busyId === 'dialog' ? '导入中...' : '导入项目'}</span>
+              <span className="text-sm">{busyId === 'dialog' ? '打开中...' : '打开创作空间'}</span>
+            </button>
+            <button
+              onClick={() => void handleImportNovel()}
+              className="flex items-center gap-1.5 px-4 py-2 rounded-lg transition-all"
+              style={{ border: '1px solid #E0E0EA', color: '#6E6E8A', background: '#FFFFFF' }}
+            >
+              <BookOpenIcon size={15} />
+              <span className="text-sm">{busyId === 'novel' ? '导入中...' : '导入已有小说'}</span>
             </button>
             <button
               onClick={() => setShowNewModal(true)}
@@ -479,7 +533,15 @@ export function HomePage() {
                 style={{ border: '1px solid #E0E0EA', color: '#6E6E8A', background: '#FFFFFF' }}
               >
                 <FolderOpenIcon size={15} />
-                <span className="text-sm">导入项目</span>
+                <span className="text-sm">打开创作空间</span>
+              </button>
+              <button
+                onClick={() => void handleImportNovel()}
+                className="flex items-center gap-1.5 px-5 py-2.5 rounded-lg transition-all"
+                style={{ border: '1px solid #E0E0EA', color: '#6E6E8A', background: '#FFFFFF' }}
+              >
+                <BookOpenIcon size={15} />
+                <span className="text-sm">导入已有小说</span>
               </button>
               <button
                 onClick={() => setShowNewModal(true)}
@@ -490,6 +552,13 @@ export function HomePage() {
                 <span className="text-sm">新建项目</span>
               </button>
             </div>
+            <button
+              onClick={() => void handleImportLegacy()}
+              className="text-xs mt-2"
+              style={{ color: '#8B8B9E', textDecoration: 'underline' }}
+            >
+              {busyId === 'legacy' ? '正在迁移...' : '迁移旧版 JSON 项目'}
+            </button>
           </div>
         ) : (
           <>
@@ -518,34 +587,44 @@ export function HomePage() {
         <div
           className="fixed inset-0 z-50 flex items-center justify-center"
           style={{ background: 'rgba(0,0,0,0.35)', backdropFilter: 'blur(4px)' }}
+          onClick={() => setShowNewModal(false)}
         >
-          <div
+          <form
+            ref={newProjectDialogRef}
+            tabIndex={-1}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="new-project-title"
             className="rounded-2xl p-7 w-full max-w-md mx-4"
             style={{ background: '#FFFFFF', boxShadow: '0 24px 64px rgba(0,0,0,0.12)' }}
             onClick={(e) => e.stopPropagation()}
+            onSubmit={(e) => {
+              e.preventDefault();
+              void handleCreate();
+            }}
           >
             <h2
+              id="new-project-title"
               style={{ color: '#1A1A2E', letterSpacing: '-0.3px' }}
               className="text-xl mb-1.5"
             >
-              新建创作项目
+              新建项目
             </h2>
-            <p style={{ color: '#8B8B9E' }} className="text-sm mb-6">
-              填写基础信息，马上进入写作界面
-            </p>
 
-            <div className="space-y-4">
+            <div className="space-y-5 mt-6">
               <div>
                 <label
+                  htmlFor="new-project-name"
                   style={{ color: '#4A4A6A', display: 'block', marginBottom: '6px' }}
                   className="text-sm"
                 >
-                  作品名称 *
+                  项目名称
                 </label>
                 <input
+                  id="new-project-name"
                   value={newTitle}
                   onChange={(e) => setNewTitle(e.target.value)}
-                  placeholder="为您的故事取一个名字"
+                  placeholder="输入项目名称"
                   className="w-full px-3 py-2.5 rounded-lg outline-none transition-all text-sm"
                   style={{ border: '1.5px solid #E0E0EA', background: '#FAFAFA', color: '#1A1A2E' }}
                   onFocus={(e) => (e.target.style.borderColor = '#4A7CF7')}
@@ -555,43 +634,40 @@ export function HomePage() {
               </div>
               <div>
                 <label
+                  htmlFor="new-project-path"
                   style={{ color: '#4A4A6A', display: 'block', marginBottom: '6px' }}
                   className="text-sm"
                 >
-                  类型 / 风格
+                  文件地址
                 </label>
-                <input
-                  value={newGenre}
-                  onChange={(e) => setNewGenre(e.target.value)}
-                  placeholder="如：都市奇幻、武侠、科幻..."
-                  className="w-full px-3 py-2.5 rounded-lg outline-none transition-all text-sm"
-                  style={{ border: '1.5px solid #E0E0EA', background: '#FAFAFA', color: '#1A1A2E' }}
-                  onFocus={(e) => (e.target.style.borderColor = '#4A7CF7')}
-                  onBlur={(e) => (e.target.style.borderColor = '#E0E0EA')}
-                />
-              </div>
-              <div>
-                <label
-                  style={{ color: '#4A4A6A', display: 'block', marginBottom: '6px' }}
-                  className="text-sm"
-                >
-                  故事简介
-                </label>
-                <textarea
-                  value={newDesc}
-                  onChange={(e) => setNewDesc(e.target.value)}
-                  placeholder="用几句话描述您的故事..."
-                  rows={3}
-                  className="w-full px-3 py-2.5 rounded-lg outline-none transition-all text-sm resize-none"
-                  style={{ border: '1.5px solid #E0E0EA', background: '#FAFAFA', color: '#1A1A2E' }}
-                  onFocus={(e) => (e.target.style.borderColor = '#4A7CF7')}
-                  onBlur={(e) => (e.target.style.borderColor = '#E0E0EA')}
-                />
+                <div className="flex gap-2">
+                  <input
+                    id="new-project-path"
+                    value={newWorkspacePath}
+                    onChange={(e) => setNewWorkspacePath(e.target.value)}
+                    placeholder="选择或输入文件夹地址"
+                    className="min-w-0 flex-1 px-3 py-2.5 rounded-lg outline-none transition-all text-sm"
+                    style={{ border: '1.5px solid #E0E0EA', background: '#FAFAFA', color: '#1A1A2E' }}
+                    onFocus={(e) => (e.target.style.borderColor = '#4A7CF7')}
+                    onBlur={(e) => (e.target.style.borderColor = '#E0E0EA')}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void handleChooseWorkspacePath()}
+                    disabled={isChoosingWorkspacePath}
+                    className="shrink-0 flex items-center gap-1.5 px-3.5 py-2.5 rounded-lg text-sm transition-colors"
+                    style={{ border: '1.5px solid #E0E0EA', color: '#4A4A6A', background: '#FFFFFF' }}
+                  >
+                    <FolderOpenIcon size={15} />
+                    {isChoosingWorkspacePath ? '选择中' : '浏览'}
+                  </button>
+                </div>
               </div>
             </div>
 
             <div className="flex gap-3 mt-7">
               <button
+                type="button"
                 onClick={() => setShowNewModal(false)}
                 className="flex-1 py-2.5 rounded-lg text-sm transition-colors"
                 style={{ border: '1.5px solid #E0E0EA', color: '#6E6E8A', background: 'transparent' }}
@@ -601,19 +677,19 @@ export function HomePage() {
                 取消
               </button>
               <button
-                onClick={() => void handleCreate()}
-                disabled={!newTitle.trim()}
+                type="submit"
+                disabled={!newTitle.trim() || !newWorkspacePath.trim() || isCreatingProject}
                 className="flex-1 py-2.5 rounded-lg text-sm transition-all"
                 style={{
-                  background: newTitle.trim() ? '#1A1A2E' : '#D0D0DC',
+                  background: newTitle.trim() && newWorkspacePath.trim() && !isCreatingProject ? '#1A1A2E' : '#D0D0DC',
                   color: '#FFFFFF',
-                  cursor: newTitle.trim() ? 'pointer' : 'not-allowed'
+                  cursor: newTitle.trim() && newWorkspacePath.trim() && !isCreatingProject ? 'pointer' : 'not-allowed'
                 }}
               >
-                创建项目
+                {isCreatingProject ? '创建中...' : '创建项目'}
               </button>
             </div>
-          </div>
+          </form>
         </div>
       )}
 

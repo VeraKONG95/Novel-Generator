@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { EyeIcon, EyeOffIcon, XIcon } from 'lucide-react';
 import { ModelSettings } from '../../types';
+import { useDialogAccessibility } from '../../hooks/useDialogAccessibility';
 
 interface SettingsModalProps {
   settings: ModelSettings;
@@ -9,19 +10,55 @@ interface SettingsModalProps {
 }
 
 export function SettingsModal({ settings, onSave, onClose }: SettingsModalProps) {
+  const dialogRef = useDialogAccessibility(onClose);
   const [draft, setDraft] = useState<ModelSettings>(settings);
   const [showKey, setShowKey] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [checkMessage, setCheckMessage] = useState('');
+  const [checkOk, setCheckOk] = useState(false);
 
   useEffect(() => {
     setDraft(settings);
   }, [settings]);
 
   const handleSave = async () => {
+    if (!draft.apiKey.trim() || !draft.baseUrl.trim() || !draft.model.trim()) {
+      setCheckOk(false);
+      setCheckMessage('请先完整填写 Base URL、模型名和 API Key。');
+      return;
+    }
+    if ((draft.maxOutputTokens || 16384) + 8000 >= (draft.contextWindow || 128000)) {
+      setCheckOk(false);
+      setCheckMessage('单次输出上限过大，请至少为创作资料预留 8000 个容量。');
+      return;
+    }
     setIsSaving(true);
+    setCheckMessage('正在检查连接、中文输出、连续输出和受控动作...');
     try {
-      await onSave(draft);
-      onClose();
+      const result = await window.novalAPI.probeModel(draft);
+      const nextDraft: ModelSettings = {
+        ...draft,
+        capabilityStatus: result?.ok ? 'ready' : 'failed',
+        capabilityCheckedAt: new Date().toISOString(),
+        capabilityMessage: result?.ok ? '模型已通过完整创作能力检查' : result?.error || '模型检查失败'
+      };
+      setDraft(nextDraft);
+      setCheckOk(Boolean(result?.ok));
+      setCheckMessage(nextDraft.capabilityMessage || '');
+      await onSave(nextDraft);
+      if (result?.ok) onClose();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '模型检查意外中断';
+      const failedDraft: ModelSettings = {
+        ...draft,
+        capabilityStatus: 'failed',
+        capabilityCheckedAt: new Date().toISOString(),
+        capabilityMessage: message
+      };
+      setDraft(failedDraft);
+      setCheckOk(false);
+      setCheckMessage(message);
+      await onSave(failedDraft);
     } finally {
       setIsSaving(false);
     }
@@ -33,6 +70,11 @@ export function SettingsModal({ settings, onSave, onClose }: SettingsModalProps)
       style={{ background: 'rgba(0,0,0,0.4)', backdropFilter: 'blur(6px)' }}
     >
       <div
+        ref={dialogRef}
+        tabIndex={-1}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="model-settings-title"
         className="rounded-2xl overflow-hidden flex flex-col"
         style={{
           background: '#FFFFFF',
@@ -48,15 +90,16 @@ export function SettingsModal({ settings, onSave, onClose }: SettingsModalProps)
           style={{ borderBottom: '1px solid #EAEAEA' }}
         >
           <div>
-            <h2 style={{ color: '#1A1A2E', letterSpacing: '-0.3px' }} className="text-lg">
+            <h2 id="model-settings-title" style={{ color: '#1A1A2E', letterSpacing: '-0.3px' }} className="text-lg">
               模型设置
             </h2>
             <p style={{ color: '#8B8B9E' }} className="text-xs mt-0.5">
-              配置 API Key、Base URL 和模型名。未配置时会自动回退到本地模板。
+              配置后会先检查模型是否能安全完成连续创作任务。检查失败时不会生成模板内容。
             </p>
           </div>
           <button
             onClick={onClose}
+            aria-label="关闭模型设置"
             className="p-2 rounded-lg transition-colors"
             style={{ color: '#8B8B9E' }}
             onMouseEnter={(e) => (e.currentTarget as HTMLElement).style.background = '#F0F0F5'}
@@ -68,13 +111,14 @@ export function SettingsModal({ settings, onSave, onClose }: SettingsModalProps)
 
         <div className="flex-1 overflow-y-auto p-6 space-y-4">
           <div>
-            <label style={{ color: '#4A4A6A', display: 'block', marginBottom: '6px' }} className="text-xs">
+            <label htmlFor="model-provider" style={{ color: '#4A4A6A', display: 'block', marginBottom: '6px' }} className="text-xs">
               Provider
             </label>
             <input
+              id="model-provider"
               value={draft.provider}
-              onChange={(e) => setDraft({ ...draft, provider: e.target.value })}
-              placeholder="如：openai-compatible"
+              onChange={(e) => setDraft({ ...draft, provider: e.target.value, capabilityStatus: 'unchecked' })}
+              placeholder="如：openrouter"
               className="w-full px-3 py-2.5 rounded-lg text-sm outline-none"
               style={{ border: '1.5px solid #E0E0EA', background: '#FAFAFA', color: '#1A1A2E' }}
               onFocus={(e) => (e.target.style.borderColor = '#4A7CF7')}
@@ -83,13 +127,14 @@ export function SettingsModal({ settings, onSave, onClose }: SettingsModalProps)
           </div>
 
           <div>
-            <label style={{ color: '#4A4A6A', display: 'block', marginBottom: '6px' }} className="text-xs">
+            <label htmlFor="model-base-url" style={{ color: '#4A4A6A', display: 'block', marginBottom: '6px' }} className="text-xs">
               Base URL
             </label>
             <input
+              id="model-base-url"
               value={draft.baseUrl}
-              onChange={(e) => setDraft({ ...draft, baseUrl: e.target.value })}
-              placeholder="https://api.openai.com/v1"
+              onChange={(e) => setDraft({ ...draft, baseUrl: e.target.value, capabilityStatus: 'unchecked' })}
+              placeholder="https://openrouter.ai/api/v1"
               className="w-full px-3 py-2.5 rounded-lg text-sm outline-none"
               style={{ border: '1.5px solid #E0E0EA', background: '#FAFAFA', color: '#1A1A2E' }}
               onFocus={(e) => (e.target.style.borderColor = '#4A7CF7')}
@@ -98,13 +143,14 @@ export function SettingsModal({ settings, onSave, onClose }: SettingsModalProps)
           </div>
 
           <div>
-            <label style={{ color: '#4A4A6A', display: 'block', marginBottom: '6px' }} className="text-xs">
+            <label htmlFor="model-name" style={{ color: '#4A4A6A', display: 'block', marginBottom: '6px' }} className="text-xs">
               Model
             </label>
             <input
+              id="model-name"
               value={draft.model}
-              onChange={(e) => setDraft({ ...draft, model: e.target.value })}
-              placeholder="如：gpt-4.1-mini"
+              onChange={(e) => setDraft({ ...draft, model: e.target.value, capabilityStatus: 'unchecked' })}
+              placeholder="如：deepseek/deepseek-v4-flash"
               className="w-full px-3 py-2.5 rounded-lg text-sm outline-none"
               style={{ border: '1.5px solid #E0E0EA', background: '#FAFAFA', color: '#1A1A2E' }}
               onFocus={(e) => (e.target.style.borderColor = '#4A7CF7')}
@@ -113,14 +159,15 @@ export function SettingsModal({ settings, onSave, onClose }: SettingsModalProps)
           </div>
 
           <div>
-            <label style={{ color: '#4A4A6A', display: 'block', marginBottom: '6px' }} className="text-xs">
+            <label htmlFor="model-api-key" style={{ color: '#4A4A6A', display: 'block', marginBottom: '6px' }} className="text-xs">
               API Key
             </label>
             <div className="relative">
               <input
+                id="model-api-key"
                 type={showKey ? 'text' : 'password'}
                 value={draft.apiKey}
-                onChange={(e) => setDraft({ ...draft, apiKey: e.target.value })}
+                onChange={(e) => setDraft({ ...draft, apiKey: e.target.value, capabilityStatus: 'unchecked' })}
                 placeholder="输入可用的 API Key"
                 className="w-full px-3 py-2.5 pr-10 rounded-lg text-sm outline-none"
                 style={{ border: '1.5px solid #E0E0EA', background: '#FAFAFA', color: '#1A1A2E' }}
@@ -130,6 +177,7 @@ export function SettingsModal({ settings, onSave, onClose }: SettingsModalProps)
               <button
                 type="button"
                 onClick={() => setShowKey((current) => !current)}
+                aria-label={showKey ? '隐藏 API Key' : '显示 API Key'}
                 className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-lg"
                 style={{ color: '#8B8B9E' }}
               >
@@ -137,9 +185,48 @@ export function SettingsModal({ settings, onSave, onClose }: SettingsModalProps)
               </button>
             </div>
             <p style={{ color: '#9999B3' }} className="text-xs mt-1.5">
-              当前 Key 仅保存在本机设置文件中，不会写入项目文件。
+              当前 Key 会以明文保存在本机设置文件中，不会写入项目文件。
             </p>
           </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label htmlFor="model-context-window" style={{ color: '#4A4A6A', display: 'block', marginBottom: '6px' }} className="text-xs">
+                上下文容量
+              </label>
+              <input
+                id="model-context-window"
+                type="number"
+                min={8192}
+                value={draft.contextWindow || 128000}
+                onChange={(e) => setDraft({ ...draft, contextWindow: Number(e.target.value) || 128000, capabilityStatus: 'unchecked' })}
+                className="w-full px-3 py-2.5 rounded-lg text-sm outline-none"
+                style={{ border: '1.5px solid #E0E0EA', background: '#FAFAFA', color: '#1A1A2E' }}
+              />
+            </div>
+            <div>
+              <label htmlFor="model-max-output" style={{ color: '#4A4A6A', display: 'block', marginBottom: '6px' }} className="text-xs">
+                单次最长输出
+              </label>
+              <input
+                id="model-max-output"
+                type="number"
+                min={1024}
+                value={draft.maxOutputTokens || 16384}
+                onChange={(e) => setDraft({ ...draft, maxOutputTokens: Number(e.target.value) || 16384, capabilityStatus: 'unchecked' })}
+                className="w-full px-3 py-2.5 rounded-lg text-sm outline-none"
+                style={{ border: '1.5px solid #E0E0EA', background: '#FAFAFA', color: '#1A1A2E' }}
+              />
+            </div>
+          </div>
+          {checkMessage && (
+            <div
+              role="status"
+              className="rounded-lg px-3 py-2.5 text-xs"
+              style={{ background: checkOk ? '#E8F7EE' : '#FFF5E8', color: checkOk ? '#1C7C47' : '#8A5A00' }}
+            >
+              {checkMessage}
+            </div>
+          )}
         </div>
 
         <div
@@ -147,7 +234,11 @@ export function SettingsModal({ settings, onSave, onClose }: SettingsModalProps)
           style={{ borderTop: '1px solid #EAEAEA' }}
         >
           <div className="text-xs" style={{ color: '#9999B3' }}>
-            {draft.apiKey ? '已填写 API Key' : '未填写 API Key，将走本地模板回退'}
+            {draft.capabilityStatus === 'ready'
+              ? '模型已通过检查'
+              : draft.apiKey
+                ? '保存前需要完成能力检查'
+                : '未填写 API Key，创作任务将保持关闭'}
           </div>
           <div className="flex gap-3">
             <button
@@ -167,7 +258,7 @@ export function SettingsModal({ settings, onSave, onClose }: SettingsModalProps)
               onMouseLeave={(e) => (e.currentTarget as HTMLElement).style.background = '#1A1A2E'}
               disabled={isSaving}
             >
-              {isSaving ? '保存中...' : '保存设置'}
+              {isSaving ? '检查中...' : '检查并保存'}
             </button>
           </div>
         </div>

@@ -1,339 +1,158 @@
-import { useState } from 'react';
-import { UsersIcon, GlobeIcon, FeatherIcon, ChevronDownIcon, ChevronRightIcon, FileTextIcon, BookIcon, PlusIcon, ExternalLinkIcon, SparklesIcon } from 'lucide-react';
-import { Character, WorldSetting, Chapter, ActiveDoc } from '../../types';
+import { useMemo, useState } from 'react';
+import {
+  ChevronDownIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  FileJsonIcon,
+  FileTextIcon,
+  FolderIcon,
+  FolderOpenIcon
+} from 'lucide-react';
+import { WorkspaceFile } from '../../types';
 
-const WRITING_STYLES = ['抒情', '理智', '欢快', '冷峻', '细腻', '复古'];
-
-interface RightPanelProps {
-  characters: Character[];
-  worldSetting: WorldSetting;
-  writingStyle: string;
-  outline: string;
-  characterDoc: string;
-  chapters: Chapter[];
-  onOpenCharModal: () => void;
-  onOpenWorldModal: () => void;
-  onSetWritingStyle: (style: string) => void;
-  onLoadDoc: (doc: ActiveDoc) => void;
-  onGenerateBlueprint: () => void;
-  onGenerateChapter: () => void;
-  onRefreshMemory: () => void;
+interface FileNode {
+  name: string;
+  path: string;
+  children: FileNode[];
+  file?: WorkspaceFile;
 }
 
-export function RightPanel({
-  characters,
-  worldSetting,
-  writingStyle,
-  outline,
-  characterDoc,
-  chapters,
-  onOpenCharModal,
-  onOpenWorldModal,
-  onSetWritingStyle,
-  onLoadDoc,
-  onGenerateBlueprint,
-  onGenerateChapter,
-  onRefreshMemory,
-}: RightPanelProps) {
-  const [showStyleDropdown, setShowStyleDropdown] = useState(false);
-  const [contentExpanded, setContentExpanded] = useState(true);
-  const [outlineExpanded, setOutlineExpanded] = useState(true);
-  const [chaptersExpanded, setChaptersExpanded] = useState(true);
+interface RightPanelProps {
+  files: WorkspaceFile[];
+  collapsed: boolean;
+  selectedPath?: string;
+  onToggle: () => void;
+  onOpenFile: (file: WorkspaceFile) => void;
+}
 
-  return (
-    <div
-      className="flex flex-col h-full overflow-y-auto"
-      style={{ borderLeft: '1px solid #EAEAEA', background: '#FAFAFA' }}
-    >
-      {/* ─── Settings Section ─── */}
-      <div className="flex-shrink-0" style={{ borderBottom: '1px solid #EAEAEA' }}>
-        <div className="px-4 py-3.5" style={{ borderBottom: '1px solid #F0F0F5' }}>
-          <span style={{ color: '#1A1A2E' }} className="text-sm">创作设定</span>
-        </div>
+function buildTree(files: WorkspaceFile[]) {
+  const root: FileNode = { name: '', path: '', children: [] };
+  files.forEach((file) => {
+    const parts = file.path.split('/');
+    let parent = root;
+    parts.forEach((part, index) => {
+      const nextPath = parts.slice(0, index + 1).join('/');
+      let node = parent.children.find((item) => item.name === part);
+      if (!node) {
+        node = { name: part, path: nextPath, children: [] };
+        parent.children.push(node);
+      }
+      if (index === parts.length - 1) node.file = file;
+      parent = node;
+    });
+  });
+  const sort = (node: FileNode) => {
+    node.children.sort((a, b) => Number(Boolean(a.file)) - Number(Boolean(b.file)) || a.name.localeCompare(b.name, 'zh-CN'));
+    node.children.forEach(sort);
+  };
+  sort(root);
+  return root.children;
+}
 
-        <div className="px-3 py-3 space-y-2">
-          {/* Character settings button */}
-          <button
-            onClick={onOpenCharModal}
-            className="w-full flex items-center justify-between px-3.5 py-3 rounded-xl transition-colors group"
-            style={{ background: '#FFFFFF', border: '1px solid #EAEAEA' }}
-            onMouseEnter={(e) => (e.currentTarget as HTMLElement).style.borderColor = '#C8D4F8'}
-            onMouseLeave={(e) => (e.currentTarget as HTMLElement).style.borderColor = '#EAEAEA'}
-          >
-            <div className="flex items-center gap-2.5">
-              <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: '#EEF3FF' }}>
-                <UsersIcon size={14} color="#4A7CF7" />
-              </div>
-              <div className="text-left">
-                <p style={{ color: '#2A2A3E' }} className="text-xs">角色设定</p>
-                <p style={{ color: '#9999B3' }} className="text-xs">
-                  {characters.length > 0 ? `${characters.length} 个角色` : '点击配置'}
-                </p>
-              </div>
-            </div>
-            <ExternalLinkIcon size={12} color="#C8C8D8" />
-          </button>
+function FileIcon({ name }: { name: string }) {
+  return name.endsWith('.json') || name.endsWith('.jsonl')
+    ? <FileJsonIcon size={14} color="#8B8B9E" />
+    : <FileTextIcon size={14} color="#8B8B9E" />;
+}
 
-          {/* World settings button */}
-          <button
-            onClick={onOpenWorldModal}
-            className="w-full flex items-center justify-between px-3.5 py-3 rounded-xl transition-colors"
-            style={{ background: '#FFFFFF', border: '1px solid #EAEAEA' }}
-            onMouseEnter={(e) => (e.currentTarget as HTMLElement).style.borderColor = '#C8D4F8'}
-            onMouseLeave={(e) => (e.currentTarget as HTMLElement).style.borderColor = '#EAEAEA'}
-          >
-            <div className="flex items-center gap-2.5">
-              <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: '#F0FFF4' }}>
-                <GlobeIcon size={14} color="#38A169" />
-              </div>
-              <div className="text-left">
-                <p style={{ color: '#2A2A3E' }} className="text-xs">世界观设定</p>
-                <p style={{ color: '#9999B3' }} className="text-xs">
-                  {worldSetting.tags.length > 0
-                    ? worldSetting.tags.slice(0, 2).join(' · ') + (worldSetting.tags.length > 2 ? '...' : '')
-                    : '点击配置'}
-                </p>
-              </div>
-            </div>
-            <ExternalLinkIcon size={12} color="#C8C8D8" />
-          </button>
+export function RightPanel({ files, collapsed, selectedPath, onToggle, onOpenFile }: RightPanelProps) {
+  const tree = useMemo(() => buildTree(files), [files]);
+  const [closedFolders, setClosedFolders] = useState<Set<string>>(new Set());
 
-          {/* Writing style */}
-          <div className="relative">
-            <button
-              onClick={() => setShowStyleDropdown(!showStyleDropdown)}
-              className="w-full flex items-center justify-between px-3.5 py-3 rounded-xl transition-colors"
-              style={{ background: '#FFFFFF', border: '1px solid #EAEAEA' }}
-              onMouseEnter={(e) => (e.currentTarget as HTMLElement).style.borderColor = '#C8D4F8'}
-              onMouseLeave={(e) => (e.currentTarget as HTMLElement).style.borderColor = '#EAEAEA'}
-            >
-              <div className="flex items-center gap-2.5">
-                <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: '#FFF8F0' }}>
-                  <FeatherIcon size={14} color="#DD8A3A" />
-                </div>
-                <div className="text-left">
-                  <p style={{ color: '#2A2A3E' }} className="text-xs">文风设定</p>
-                  <p style={{ color: '#9999B3' }} className="text-xs">{writingStyle || '未选择'}</p>
-                </div>
-              </div>
-              <ChevronDownIcon size={12} color="#C8C8D8" style={{ transform: showStyleDropdown ? 'rotate(180deg)' : 'rotate(0)', transition: 'transform 0.2s' }} />
-            </button>
+  const toggleFolder = (folderPath: string) => {
+    setClosedFolders((current) => {
+      const next = new Set(current);
+      if (next.has(folderPath)) next.delete(folderPath);
+      else next.add(folderPath);
+      return next;
+    });
+  };
 
-            {showStyleDropdown && (
-              <div
-                className="absolute left-0 right-0 top-full z-20 mt-1 rounded-xl overflow-hidden"
-                style={{ background: '#FFFFFF', border: '1px solid #EAEAEA', boxShadow: '0 8px 24px rgba(0,0,0,0.08)' }}
-              >
-                {WRITING_STYLES.map((style) => (
-                  <button
-                    key={style}
-                    onClick={() => { onSetWritingStyle(style); setShowStyleDropdown(false); }}
-                    className="w-full flex items-center justify-between px-4 py-2.5 text-xs transition-colors"
-                    style={{
-                      color: style === writingStyle ? '#4A7CF7' : '#3A3A5A',
-                      background: style === writingStyle ? '#EEF3FF' : 'transparent',
-                    }}
-                    onMouseEnter={(e) => {
-                      if (style !== writingStyle) (e.currentTarget as HTMLElement).style.background = '#F7F7F8';
-                    }}
-                    onMouseLeave={(e) => {
-                      if (style !== writingStyle) (e.currentTarget as HTMLElement).style.background = 'transparent';
-                    }}
-                  >
-                    <span>{style}</span>
-                    {style === writingStyle && (
-                      <div className="w-1.5 h-1.5 rounded-full" style={{ background: '#4A7CF7' }} />
-                    )}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
+  const renderNode = (node: FileNode, depth = 0): React.ReactNode => {
+    if (node.file) {
+      const selected = selectedPath === node.path;
+      return (
+        <button
+          key={node.path}
+          onClick={() => onOpenFile(node.file!)}
+          className="w-full flex items-center gap-2 rounded-lg py-2 pr-2 text-left transition-colors"
+          style={{
+            paddingLeft: `${10 + depth * 16}px`,
+            background: selected ? '#EEF3FF' : 'transparent',
+            color: selected ? '#2E5BD1' : '#4A4A6A'
+          }}
+          title={node.path}
+        >
+          <FileIcon name={node.name} />
+          <span className="text-xs truncate flex-1">{node.name}</span>
+        </button>
+      );
+    }
+    const closed = closedFolders.has(node.path);
+    return (
+      <div key={node.path}>
+        <button
+          onClick={() => toggleFolder(node.path)}
+          className="w-full flex items-center gap-1.5 rounded-lg py-2 pr-2 text-left transition-colors"
+          style={{ paddingLeft: `${8 + depth * 16}px`, color: '#3A3A5A' }}
+        >
+          {closed ? <ChevronRightIcon size={12} color="#9999B3" /> : <ChevronDownIcon size={12} color="#9999B3" />}
+          {closed ? <FolderIcon size={14} color="#7D8BA8" /> : <FolderOpenIcon size={14} color="#7D8BA8" />}
+          <span className="text-xs truncate">{node.name}</span>
+        </button>
+        {!closed && node.children.map((child) => renderNode(child, depth + 1))}
+      </div>
+    );
+  };
+
+  if (collapsed) {
+    return (
+      <div className="h-full flex flex-col items-center py-3" style={{ borderLeft: '1px solid #EAEAEA', background: '#FAFAFA' }}>
+        <button
+          onClick={onToggle}
+          aria-label="展开项目文件"
+          title="展开项目文件"
+          className="w-8 h-8 rounded-lg flex items-center justify-center"
+          style={{ color: '#6E6E8A' }}
+        >
+          <FolderIcon size={16} />
+        </button>
+        <div className="mt-2" style={{ color: '#9999B3', writingMode: 'vertical-rl', fontSize: '11px', letterSpacing: '0.12em' }}>
+          项目文件
         </div>
       </div>
+    );
+  }
 
-      {/* ─── Novel Content Section ─── */}
-      <div className="flex-1">
+  return (
+    <div className="flex flex-col h-full" style={{ borderLeft: '1px solid #EAEAEA', background: '#FAFAFA' }}>
+      <div className="flex-shrink-0 flex items-center justify-between px-4 py-3.5" style={{ borderBottom: '1px solid #EAEAEA' }}>
+        <div>
+          <p className="text-sm" style={{ color: '#1A1A2E' }}>项目文件</p>
+          <p className="text-xs mt-0.5" style={{ color: '#9999B3' }}>{files.length} 个文件</p>
+        </div>
         <button
-          onClick={() => setContentExpanded(!contentExpanded)}
-          className="w-full flex items-center justify-between px-4 py-3.5"
-          style={{ borderBottom: '1px solid #F0F0F5' }}
+          onClick={onToggle}
+          aria-label="收起项目文件"
+          title="收起项目文件"
+          className="p-1.5 rounded-lg"
+          style={{ color: '#8B8B9E' }}
         >
-          <span style={{ color: '#1A1A2E' }} className="text-sm">小说成品</span>
-          <div className="flex items-center gap-2">
-            {contentExpanded ? <ChevronDownIcon size={14} color="#9999B3" /> : <ChevronRightIcon size={14} color="#9999B3" />}
-          </div>
+          <ChevronRightIcon size={15} />
         </button>
-
-        {contentExpanded && (
-          <div className="px-3 py-2 space-y-1">
-            <div className="flex gap-2 px-3 py-2">
-              <button
-                onClick={onRefreshMemory}
-                className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs transition-colors"
-                style={{ border: '1px solid #E0E0EA', color: '#6E6E8A', background: '#FFFFFF' }}
-                onMouseEnter={(e) => (e.currentTarget as HTMLElement).style.background = '#F0F0F5'}
-                onMouseLeave={(e) => (e.currentTarget as HTMLElement).style.background = '#FFFFFF'}
-              >
-                <SparklesIcon size={11} />
-                刷新记忆
-              </button>
-            </div>
-
-            {/* Character doc */}
-            <button
-              onClick={() =>
-                onLoadDoc({
-                  id: 'characterDoc',
-                  type: 'characterDoc',
-                  title: '角色世界观文档',
-                  content: characterDoc,
-                })
-              }
-              className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg transition-colors"
-              style={{ background: 'transparent' }}
-              onMouseEnter={(e) => (e.currentTarget as HTMLElement).style.background = '#F0F0F5'}
-              onMouseLeave={(e) => (e.currentTarget as HTMLElement).style.background = 'transparent'}
-            >
-              <FileTextIcon size={14} color="#9999B3" />
-              <span style={{ color: '#3A3A5A' }} className="text-xs flex-1 text-left">角色世界观文档</span>
-              <span style={{ color: '#C0C0CC' }} className="text-xs">{characterDoc ? '已生成' : '查看'}</span>
-            </button>
-
-            {/* Outline */}
-            <div>
-              <button
-                onClick={() => setOutlineExpanded(!outlineExpanded)}
-                className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg transition-colors"
-                style={{ background: 'transparent' }}
-                onMouseEnter={(e) => (e.currentTarget as HTMLElement).style.background = '#F0F0F5'}
-                onMouseLeave={(e) => (e.currentTarget as HTMLElement).style.background = 'transparent'}
-              >
-                {outlineExpanded ? (
-                  <ChevronDownIcon size={14} color="#9999B3" />
-                ) : (
-                  <ChevronRightIcon size={14} color="#9999B3" />
-                )}
-                <BookIcon size={13} color="#9999B3" />
-                <span style={{ color: '#3A3A5A' }} className="text-xs flex-1 text-left">故事大纲</span>
-                <span style={{ color: '#C0C0CC' }} className="text-xs">{outline ? '已生成' : '未生成'}</span>
-              </button>
-
-              {outlineExpanded && (
-                <div className="ml-7 flex flex-col gap-1">
-                  <button
-                    onClick={onGenerateBlueprint}
-                    className="w-[calc(100%-1.75rem)] flex items-center gap-2 px-3 py-2 rounded-lg transition-colors"
-                    style={{ background: 'transparent' }}
-                    onMouseEnter={(e) => (e.currentTarget as HTMLElement).style.background = '#EEF3FF'}
-                    onMouseLeave={(e) => (e.currentTarget as HTMLElement).style.background = 'transparent'}
-                  >
-                    <SparklesIcon size={12} color="#4A7CF7" />
-                    <span style={{ color: '#4A7CF7' }} className="text-xs">{outline ? '重新生成蓝图' : '生成蓝图'}</span>
-                  </button>
-                  <button
-                    onClick={() =>
-                      onLoadDoc({
-                        id: 'outline',
-                        type: 'outline',
-                        title: '故事大纲',
-                        content: outline,
-                      })
-                    }
-                    className="w-[calc(100%-1.75rem)] flex items-center gap-2 px-3 py-2 rounded-lg transition-colors"
-                    style={{ background: 'transparent' }}
-                    onMouseEnter={(e) => (e.currentTarget as HTMLElement).style.background = '#EEF3FF'}
-                    onMouseLeave={(e) => (e.currentTarget as HTMLElement).style.background = 'transparent'}
-                  >
-                    <FileTextIcon size={12} color="#4A7CF7" />
-                    <span style={{ color: '#4A7CF7' }} className="text-xs">{outline ? '查看 / 编辑大纲' : '新建 / 编辑大纲'}</span>
-                  </button>
-                </div>
-              )}
-            </div>
-
-            {/* Chapters */}
-            <div>
-              <button
-                onClick={() => setChaptersExpanded(!chaptersExpanded)}
-                className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg transition-colors"
-                style={{ background: 'transparent' }}
-                onMouseEnter={(e) => (e.currentTarget as HTMLElement).style.background = '#F0F0F5'}
-                onMouseLeave={(e) => (e.currentTarget as HTMLElement).style.background = 'transparent'}
-              >
-                {chaptersExpanded ? (
-                  <ChevronDownIcon size={14} color="#9999B3" />
-                ) : (
-                  <ChevronRightIcon size={14} color="#9999B3" />
-                )}
-                <BookIcon size={13} color="#9999B3" />
-                <span style={{ color: '#3A3A5A' }} className="text-xs flex-1 text-left">小说章节</span>
-                <span style={{ color: '#C0C0CC' }} className="text-xs">{chapters.length} 章</span>
-              </button>
-
-              {chaptersExpanded && (
-                <div className="ml-7 space-y-0.5">
-                  {chapters.map((chapter) => (
-                    <button
-                      key={chapter.id}
-                      onClick={() =>
-                        onLoadDoc({
-                          id: chapter.id,
-                          type: 'chapter',
-                          title: `第${chapter.number}章：${chapter.title}`,
-                          content: chapter.content,
-                        })
-                      }
-                      className="w-[calc(100%-0)] flex items-start gap-2 px-3 py-2.5 rounded-lg transition-colors text-left"
-                      style={{ background: 'transparent' }}
-                      onMouseEnter={(e) => (e.currentTarget as HTMLElement).style.background = '#F5F5F8'}
-                      onMouseLeave={(e) => (e.currentTarget as HTMLElement).style.background = 'transparent'}
-                    >
-                      <span
-                        className="flex-shrink-0 text-xs px-1.5 py-0.5 rounded mt-0.5"
-                        style={{ background: '#F0F0F5', color: '#8B8B9E', minWidth: '28px', textAlign: 'center' }}
-                      >
-                        {chapter.number}
-                      </span>
-                      <div className="flex-1 min-w-0">
-                        <p style={{ color: '#3A3A5A' }} className="text-xs truncate">{chapter.title}</p>
-                        <p style={{ color: '#C0C0CC' }} className="text-xs mt-0.5">
-                          {(chapter.wordCount / 1000).toFixed(1)}k字
-                        </p>
-                      </div>
-                    </button>
-                  ))}
-
-                  {/* Generate next chapter button */}
-                  <button
-                    onClick={onGenerateChapter}
-                    className="w-full flex items-center gap-2 px-3 py-2.5 rounded-lg transition-colors"
-                    style={{ border: '1px dashed #D0D0DC', color: '#8B8B9E', background: 'transparent', marginTop: '4px' }}
-                    onMouseEnter={(e) => {
-                      (e.currentTarget as HTMLElement).style.background = '#F7F7FB';
-                      (e.currentTarget as HTMLElement).style.borderColor = '#4A7CF7';
-                      (e.currentTarget as HTMLElement).style.color = '#4A7CF7';
-                    }}
-                    onMouseLeave={(e) => {
-                      (e.currentTarget as HTMLElement).style.background = 'transparent';
-                      (e.currentTarget as HTMLElement).style.borderColor = '#D0D0DC';
-                      (e.currentTarget as HTMLElement).style.color = '#8B8B9E';
-                    }}
-                  >
-                    <PlusIcon size={13} />
-                    <span className="text-xs">生成第 {chapters.length + 1} 章</span>
-                  </button>
-                </div>
-              )}
-            </div>
+      </div>
+      <div className="flex-1 overflow-y-auto px-2 py-2">
+        {tree.length ? tree.map((node) => renderNode(node)) : (
+          <div className="px-3 py-10 text-center">
+            <FolderIcon size={22} color="#C8C8D8" className="mx-auto" />
+            <p className="text-xs mt-2" style={{ color: '#9999B3' }}>暂无项目文件</p>
           </div>
         )}
       </div>
-
-      {/* Click outside to close style dropdown */}
-      {showStyleDropdown && (
-        <div className="fixed inset-0 z-10" onClick={() => setShowStyleDropdown(false)} />
-      )}
+      <div className="px-3 py-3 flex items-center gap-2" style={{ borderTop: '1px solid #EAEAEA', color: '#9999B3' }}>
+        <ChevronLeftIcon size={12} />
+        <span className="text-xs">点击文件可只读预览</span>
+      </div>
     </div>
   );
 }

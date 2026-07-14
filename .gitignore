@@ -4,3 +4,6 @@ dist
 .npm-cache
 tmp
 backups
+.env
+.env.*
+!.env.example

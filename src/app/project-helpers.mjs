@@ -199,6 +199,7 @@ export function createChapter(state) {
     content: "",
     instruction: "",
     status: "draft",
+    sections: [],
     updatedAt: new Date().toISOString()
   };
 
