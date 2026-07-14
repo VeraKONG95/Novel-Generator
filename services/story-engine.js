@@ -204,6 +204,188 @@ function buildFallbackBlueprint(setup) {
   const genreSeed = setup.genre || "长篇网文";
   const conflict = setup.conflict || setup.premise || "在危险世界中挣扎求生";
   const titleBase = protagonistName.replace(/\s+/g, "") || "无名者";
+  const mainPlot = `${protagonistName}从边城遗迹中获得能力后，一边逃亡，一边追查灭门案和旧神复苏之间的联系，最终撕开权力结构最上层的真相。`;
+  const subPlots = [
+    "主角与引路人之间从互相利用到建立脆弱同盟。",
+    "宿敌视角不断推进，形成压迫式追捕线。",
+    "主角的能力反噬让每次胜利都带有代价。"
+  ];
+  const characters = [
+    {
+      id: "char-1",
+      name: protagonistName,
+      role: "主角",
+      identity: "被宗门放逐的少年",
+      personality: "冷静、能忍、对真相有病态执念",
+      goal: "查清家族旧案并活下来",
+      conflict: "能力越强，反噬越重",
+      traits: ["高压下判断快", "对盟友不轻易信任"],
+      relationships: ["与引路人互相利用", "与宿敌彼此映照"],
+      desire: "查清家族灭门真相，并证明自己不是被命运随意处置的人。",
+      fear: "真相证明家族覆灭与自己有关。",
+      wound: "被宗门放逐与家族旧案共同造成的羞辱感。",
+      secret: "能力来源可能与旧神遗迹存在血脉级联系。",
+      ability: "看见因果裂痕，并短暂利用裂痕改写战斗判断。",
+      limitation: "每次使用能力都会带来身体反噬和身份暴露风险。",
+      relationEdges: [
+        {
+          id: "rel-1-2",
+          targetCharacterId: "char-2",
+          targetCharacterName: "沈照微",
+          type: "互相利用",
+          dynamic: "她给出线索，他提供进入遗迹的钥匙。"
+        },
+        {
+          id: "rel-1-3",
+          targetCharacterId: "char-3",
+          targetCharacterName: "顾沉霄",
+          type: "宿敌",
+          dynamic: "顾沉霄越想维持秩序，越把他推向秩序的反面。"
+        }
+      ],
+      arc: [
+        {
+          id: "arc-1-1",
+          stage: "求生",
+          change: "从被动逃亡转向主动寻找线索。",
+          trigger: "边城遗迹中的第一次能力觉醒。",
+          payoff: "愿意为真相承受能力代价。"
+        },
+        {
+          id: "arc-1-2",
+          stage: "反攻",
+          change: "从只追求复仇转向重写压迫自己的秩序。",
+          trigger: "发现灭门案只是旧神复苏计划的一环。",
+          payoff: "把个人命运与王朝暗流绑在一起。"
+        }
+      ]
+    },
+    {
+      id: "char-2",
+      name: "沈照微",
+      role: "引路人",
+      identity: "掌握遗迹情报的神秘协作者",
+      personality: "温和外表下极度现实",
+      goal: "借主角进入遗迹核心",
+      conflict: "必须在利用和保护主角之间做选择",
+      traits: ["善于布局", "有隐藏身份"],
+      relationships: [`对${protagonistName}半真半假地提供帮助`],
+      desire: "拿到遗迹核心里的旧账证据。",
+      fear: "自己真正效忠的势力提前暴露。",
+      wound: "曾因一次错误判断害死同伴。",
+      secret: "她接近主角并非偶然。",
+      ability: "情报整合、伪装身份、提前布置退路。",
+      limitation: "不能公开背叛原有势力。",
+      relationEdges: [
+        {
+          id: "rel-2-1",
+          targetCharacterId: "char-1",
+          targetCharacterName: protagonistName,
+          type: "危险同盟",
+          dynamic: "越了解主角，越难把他只当作工具。"
+        }
+      ],
+      arc: [
+        {
+          id: "arc-2-1",
+          stage: "利用",
+          change: "从控制主角路线到承认局势失控。",
+          trigger: "主角做出不符合她计划的选择。",
+          payoff: "在关键节点交出真正情报。"
+        }
+      ]
+    },
+    {
+      id: "char-3",
+      name: "顾沉霄",
+      role: "宿敌",
+      identity: "旧秩序的高位执行者",
+      personality: "傲慢、强大、极端相信秩序",
+      goal: "在旧神复苏前清除一切不稳定因素",
+      conflict: "越想镇压乱局，越把主角推向自己的对立面",
+      traits: ["强控制欲", "执行力极高"],
+      relationships: [`与${protagonistName}注定长期对抗`],
+      desire: "维持王朝与宗门共同认可的秩序。",
+      fear: "秩序崩塌后自己过去的牺牲变得毫无意义。",
+      wound: "曾亲眼见过失控力量毁掉一座城。",
+      secret: "他知道灭门案的部分真相，但认为隐瞒更能维持稳定。",
+      ability: "调动追捕体系、正面压制、制度性封锁。",
+      limitation: "无法理解被秩序牺牲者的立场。",
+      relationEdges: [
+        {
+          id: "rel-3-1",
+          targetCharacterId: "char-1",
+          targetCharacterName: protagonistName,
+          type: "秩序对立",
+          dynamic: "他越追杀主角，越证明主角追查方向正确。"
+        }
+      ],
+      arc: [
+        {
+          id: "arc-3-1",
+          stage: "压制",
+          change: "从蔑视主角到承认主角是秩序级威胁。",
+          trigger: "主角连续破解追捕布局。",
+          payoff: "亲自下场，抬高主线压力。"
+        }
+      ]
+    }
+  ];
+  const plotlines = [
+    {
+      id: "plot-main",
+      type: "main",
+      title: "灭门案与旧神复苏主线",
+      goal: mainPlot,
+      ownerCharacterIds: ["char-1"],
+      dependencies: [],
+      reveals: ["灭门案不是孤立仇杀", "旧神遗迹正在借人间秩序复苏"],
+      foreshadows: ["因果裂痕会指向更高层权力结构", "主角能力来源不干净"],
+      payoff: "主角撕开真相，并把个人复仇升级成秩序重写。",
+      status: "planned",
+      beats: Array.from({ length: 10 }, (_, index) => ({
+        id: `beat-main-${index + 1}`,
+        title: chapterTitle(index + 1, protagonistName),
+        summary: chapterGoal(index + 1, protagonistName, conflict),
+        type: index === 0 ? "inciting" : index === 9 ? "turning_point" : "event",
+        chapterIndex: index + 1,
+        sectionId: "",
+        ownerCharacterIds: ["char-1"],
+        participantCharacterIds: index >= 5 ? ["char-1", "char-2", "char-3"] : ["char-1"],
+        dependencyBeatIds: index > 0 ? [`beat-main-${index}`] : [],
+        reveals: index % 3 === 0 ? ["旧案线索出现新解释"] : [],
+        foreshadows: [chapterTwist(index + 1)],
+        payoff: index === 9 ? "进入更大舞台" : "推动下一章压力升级",
+        status: "planned"
+      }))
+    },
+    {
+      id: "plot-alliance",
+      type: "relationship",
+      title: "主角与沈照微的危险同盟",
+      goal: subPlots[0],
+      ownerCharacterIds: ["char-1", "char-2"],
+      dependencies: ["plot-main"],
+      reveals: ["沈照微有隐藏身份"],
+      foreshadows: ["她的帮助自带代价"],
+      payoff: "同盟在关键节点从交易变成选择。",
+      status: "planned",
+      beats: []
+    },
+    {
+      id: "plot-rival",
+      type: "rivalry",
+      title: "顾沉霄追捕线",
+      goal: subPlots[1],
+      ownerCharacterIds: ["char-3"],
+      dependencies: ["plot-main"],
+      reveals: ["旧秩序知道更多真相"],
+      foreshadows: ["宿敌并非单纯反派"],
+      payoff: "宿敌亲自下场，把主线压力推高。",
+      status: "planned",
+      beats: []
+    }
+  ];
 
   return {
     titleOptions: [
@@ -214,44 +396,17 @@ function buildFallbackBlueprint(setup) {
     hook: `${protagonistName}得到禁忌能力后，被迫在更大的阴谋苏醒前抢先成长。`,
     synopsis: `${setup.premise}。故事从一次失控事件开始，主角被推入更残酷的秩序边缘，并在追查真相的过程中不断抬升冲突规模。`,
     worldSetting: `${setup.worldBackground}。力量体系围绕“代价换取能力”展开，每次提升都必须付出实际后果。`,
-    characters: [
-      {
-        id: "char-1",
-        name: protagonistName,
-        role: "主角",
-        personality: "冷静、能忍、对真相有病态执念",
-        goal: "查清家族旧案并活下来",
-        conflict: "能力越强，反噬越重",
-        traits: ["高压下判断快", "对盟友不轻易信任"],
-        relationships: ["与引路人互相利用", "与宿敌彼此映照"]
-      },
-      {
-        id: "char-2",
-        name: "沈照微",
-        role: "引路人",
-        personality: "温和外表下极度现实",
-        goal: "借主角进入遗迹核心",
-        conflict: "必须在利用和保护主角之间做选择",
-        traits: ["善于布局", "有隐藏身份"],
-        relationships: [`对${protagonistName}半真半假地提供帮助`]
-      },
-      {
-        id: "char-3",
-        name: "顾沉霄",
-        role: "宿敌",
-        personality: "傲慢、强大、极端相信秩序",
-        goal: "在旧神复苏前清除一切不稳定因素",
-        conflict: "越想镇压乱局，越把主角推向自己的对立面",
-        traits: ["强控制欲", "执行力极高"],
-        relationships: [`与${protagonistName}注定长期对抗`]
-      }
-    ],
-    mainPlot: `${protagonistName}从边城遗迹中获得能力后，一边逃亡，一边追查灭门案和旧神复苏之间的联系，最终撕开权力结构最上层的真相。`,
-    subPlots: [
-      "主角与引路人之间从互相利用到建立脆弱同盟。",
-      "宿敌视角不断推进，形成压迫式追捕线。",
-      "主角的能力反噬让每次胜利都带有代价。"
-    ],
+    storyBible: {
+      theme: "人在被秩序牺牲后，是否仍能选择自己的代价。",
+      narrativeStyle: setup.tone || "热血、悬疑、升级感强",
+      timelineRules: "以主角行动线顺序推进，重大回忆必须由现实线索触发。",
+      taboos: ["不要让角色无动机转向", "不要用纯解释替代场景冲突"],
+      continuityRules: toStringList(String(setup.extraConstraints || "").split(/[；;]/))
+    },
+    characters,
+    mainPlot,
+    subPlots,
+    plotlines,
     volumes: [
       {
         title: "边城裂痕",
@@ -270,7 +425,57 @@ function buildFallbackBlueprint(setup) {
       index: index + 1,
       title: chapterTitle(index + 1, protagonistName),
       goal: chapterGoal(index + 1, protagonistName, conflict),
-      turningPoint: chapterTwist(index + 1)
+      turningPoint: chapterTwist(index + 1),
+      plotBeatIds: [`beat-main-${index + 1}`],
+      characterArcIds: index < 5 ? ["arc-1-1"] : ["arc-1-2"],
+      tensionCurve: index % 3 === 0 ? "开场高压，中段误判，结尾反转" : "开场入局，中段升级，结尾留钩",
+      sections: [
+        {
+          id: `chapter-${index + 1}-section-1`,
+          index: 1,
+          title: "入场",
+          sceneGoal: "迅速把角色放进本章核心压力。",
+          pov: protagonistName,
+          location: "边城或遗迹相关场景",
+          participants: [protagonistName],
+          conflict: "外部追压与内部反噬同时出现。",
+          outcome: "主角被迫做出选择。",
+          hooks: [],
+          plotBeatIds: [`beat-main-${index + 1}`],
+          characterArcIds: index < 5 ? ["arc-1-1"] : ["arc-1-2"],
+          status: "planned"
+        },
+        {
+          id: `chapter-${index + 1}-section-2`,
+          index: 2,
+          title: "对抗",
+          sceneGoal: "用行动推进线索，不用说明堆背景。",
+          pov: protagonistName,
+          location: "冲突发生地",
+          participants: index >= 5 ? [protagonistName, "沈照微"] : [protagonistName],
+          conflict: "角色目标与即时危险发生冲突。",
+          outcome: "拿到信息，同时付出代价。",
+          hooks: [],
+          plotBeatIds: [`beat-main-${index + 1}`],
+          characterArcIds: index < 5 ? ["arc-1-1"] : ["arc-1-2"],
+          status: "planned"
+        },
+        {
+          id: `chapter-${index + 1}-section-3`,
+          index: 3,
+          title: "钩子",
+          sceneGoal: "回收本章冲突，并抛出下一章必须处理的问题。",
+          pov: protagonistName,
+          location: "本章结尾场景",
+          participants: index >= 2 ? [protagonistName, "顾沉霄"] : [protagonistName],
+          conflict: "胜利结果暴露更深风险。",
+          outcome: chapterTwist(index + 1),
+          hooks: [chapterTwist(index + 1)],
+          plotBeatIds: [`beat-main-${index + 1}`],
+          characterArcIds: index < 5 ? ["arc-1-1"] : ["arc-1-2"],
+          status: "planned"
+        }
+      ]
     }))
   };
 }
@@ -544,18 +749,145 @@ function buildFallbackRewriteResult(payload) {
   };
 }
 
+function normalizeRelationEdge(item, index, fallbackEdge) {
+  const source = item && typeof item === "object" ? item : {};
+  const fallback = fallbackEdge || {};
+  return {
+    id: String(source.id || fallback.id || `rel-ai-${index + 1}`),
+    targetCharacterId: String(source.targetCharacterId || fallback.targetCharacterId || ""),
+    targetCharacterName: String(source.targetCharacterName || source.name || fallback.targetCharacterName || ""),
+    type: String(source.type || source.relationship || fallback.type || "未定义关系"),
+    dynamic: String(source.dynamic || source.content || fallback.dynamic || "待补充")
+  };
+}
+
+function normalizeCharacterArc(item, index, fallbackArc) {
+  const source = item && typeof item === "object" ? item : {};
+  const fallback = fallbackArc || {};
+  return {
+    id: String(source.id || fallback.id || `arc-ai-${index + 1}`),
+    stage: String(source.stage || source.name || fallback.stage || `阶段 ${index + 1}`),
+    change: String(source.change || source.content || fallback.change || "待补充"),
+    trigger: String(source.trigger || fallback.trigger || "待补充"),
+    payoff: String(source.payoff || fallback.payoff || "待补充")
+  };
+}
+
 function normalizeCharacter(item, index, fallbackCharacter) {
   const source = item && typeof item === "object" ? item : {};
   const fallback = fallbackCharacter || {};
+  const goal = String(source.goal || fallback.goal || "待补充");
+  const conflict = String(source.conflict || fallback.conflict || "待补充");
+  const relationships = toStringList(source.relationships, fallback.relationships || []);
   return {
     id: String(source.id || fallback.id || `char-ai-${index + 1}`),
     name: String(source.name || fallback.name || `角色${index + 1}`),
     role: String(source.role || fallback.role || "角色"),
+    identity: String(source.identity || fallback.identity || source.role || fallback.role || "角色"),
     personality: String(source.personality || fallback.personality || "待补充"),
-    goal: String(source.goal || fallback.goal || "待补充"),
-    conflict: String(source.conflict || fallback.conflict || "待补充"),
+    goal,
+    conflict,
     traits: toStringList(source.traits, fallback.traits || []),
-    relationships: toStringList(source.relationships, fallback.relationships || [])
+    relationships,
+    desire: String(source.desire || fallback.desire || goal),
+    fear: String(source.fear || fallback.fear || "待补充"),
+    wound: String(source.wound || fallback.wound || "待补充"),
+    secret: String(source.secret || fallback.secret || "待补充"),
+    ability: String(source.ability || fallback.ability || "待补充"),
+    limitation: String(source.limitation || fallback.limitation || conflict),
+    relationEdges: Array.isArray(source.relationEdges) && source.relationEdges.length
+      ? source.relationEdges.map((edge, edgeIndex) =>
+          normalizeRelationEdge(edge, edgeIndex, fallback.relationEdges?.[edgeIndex])
+        )
+      : (fallback.relationEdges || relationships.map((dynamic) => ({ dynamic }))).map(
+          (edge, edgeIndex) => normalizeRelationEdge(edge, edgeIndex)
+        ),
+    arc: Array.isArray(source.arc) && source.arc.length
+      ? source.arc.map((arc, arcIndex) =>
+          normalizeCharacterArc(arc, arcIndex, fallback.arc?.[arcIndex])
+        )
+      : (fallback.arc || []).map((arc, arcIndex) => normalizeCharacterArc(arc, arcIndex))
+  };
+}
+
+function normalizeStoryBible(source, fallback) {
+  const raw = source && typeof source === "object" ? source : {};
+  const base = fallback || {};
+  return {
+    theme: String(raw.theme || base.theme || "待补充"),
+    narrativeStyle: String(raw.narrativeStyle || base.narrativeStyle || "待补充"),
+    timelineRules: String(raw.timelineRules || base.timelineRules || "待补充"),
+    taboos: toStringList(raw.taboos, base.taboos || []),
+    continuityRules: toStringList(raw.continuityRules, base.continuityRules || [])
+  };
+}
+
+function normalizePlotBeat(item, index, fallbackBeat) {
+  const source = item && typeof item === "object" ? item : {};
+  const fallback = fallbackBeat || {};
+  return {
+    id: String(source.id || fallback.id || `beat-ai-${index + 1}`),
+    title: String(source.title || source.name || fallback.title || `剧情节点 ${index + 1}`),
+    summary: String(source.summary || source.content || fallback.summary || "待补充"),
+    type: String(source.type || fallback.type || "event"),
+    chapterIndex: Number(source.chapterIndex || fallback.chapterIndex) || undefined,
+    sectionId: String(source.sectionId || fallback.sectionId || ""),
+    ownerCharacterIds: toStringList(source.ownerCharacterIds, fallback.ownerCharacterIds || []),
+    participantCharacterIds: toStringList(
+      source.participantCharacterIds,
+      fallback.participantCharacterIds || []
+    ),
+    dependencyBeatIds: toStringList(
+      source.dependencyBeatIds || source.dependencies,
+      fallback.dependencyBeatIds || []
+    ),
+    reveals: toStringList(source.reveals, fallback.reveals || []),
+    foreshadows: toStringList(source.foreshadows, fallback.foreshadows || []),
+    payoff: String(source.payoff || fallback.payoff || "待补充"),
+    status: String(source.status || fallback.status || "planned")
+  };
+}
+
+function normalizePlotline(item, index, fallbackPlotline) {
+  const source = item && typeof item === "object" ? item : {};
+  const fallback = fallbackPlotline || {};
+  const sourceBeats = Array.isArray(source.beats) && source.beats.length
+    ? source.beats
+    : fallback.beats || [];
+  return {
+    id: String(source.id || fallback.id || `plotline-ai-${index + 1}`),
+    type: String(source.type || fallback.type || (index === 0 ? "main" : "subplot")),
+    title: String(source.title || source.name || fallback.title || (index === 0 ? "主线" : `支线 ${index}`)),
+    goal: String(source.goal || source.summary || source.content || fallback.goal || "待补充"),
+    ownerCharacterIds: toStringList(source.ownerCharacterIds || source.owners, fallback.ownerCharacterIds || []),
+    dependencies: toStringList(source.dependencies, fallback.dependencies || []),
+    reveals: toStringList(source.reveals, fallback.reveals || []),
+    foreshadows: toStringList(source.foreshadows, fallback.foreshadows || []),
+    payoff: String(source.payoff || fallback.payoff || "待补充"),
+    status: String(source.status || fallback.status || "planned"),
+    beats: sourceBeats.map((beat, beatIndex) =>
+      normalizePlotBeat(beat, beatIndex, fallback.beats?.[beatIndex])
+    )
+  };
+}
+
+function normalizeChapterSectionPlan(item, index, fallbackSection) {
+  const source = item && typeof item === "object" ? item : {};
+  const fallback = fallbackSection || {};
+  return {
+    id: String(source.id || fallback.id || `section-plan-ai-${index + 1}`),
+    index: Number(source.index || fallback.index) || index + 1,
+    title: String(source.title || fallback.title || `第 ${index + 1} 节`),
+    sceneGoal: String(source.sceneGoal || source.goal || fallback.sceneGoal || "待补充"),
+    pov: String(source.pov || fallback.pov || ""),
+    location: String(source.location || fallback.location || ""),
+    participants: toStringList(source.participants, fallback.participants || []),
+    conflict: String(source.conflict || fallback.conflict || "待补充"),
+    outcome: String(source.outcome || fallback.outcome || "待补充"),
+    hooks: toStringList(source.hooks, fallback.hooks || []),
+    plotBeatIds: toStringList(source.plotBeatIds, fallback.plotBeatIds || []),
+    characterArcIds: toStringList(source.characterArcIds, fallback.characterArcIds || []),
+    status: String(source.status || fallback.status || "planned")
   };
 }
 
@@ -576,9 +908,30 @@ function normalizeBlueprintResult(raw, setup, fallback = buildFallbackBlueprint(
           item?.turningPoint ||
             fallback.chapterPlans[index]?.turningPoint ||
             "下一章将出现更大的外部压力。"
-        )
+        ),
+        plotBeatIds: toStringList(item?.plotBeatIds, fallback.chapterPlans[index]?.plotBeatIds || []),
+        characterArcIds: toStringList(
+          item?.characterArcIds,
+          fallback.chapterPlans[index]?.characterArcIds || []
+        ),
+        tensionCurve: String(item?.tensionCurve || fallback.chapterPlans[index]?.tensionCurve || "开场入局，中段升级，结尾留钩"),
+        sections: Array.isArray(item?.sections) && item.sections.length
+          ? item.sections.map((section, sectionIndex) =>
+              normalizeChapterSectionPlan(
+                section,
+                sectionIndex,
+                fallback.chapterPlans[index]?.sections?.[sectionIndex]
+              )
+            )
+          : (fallback.chapterPlans[index]?.sections || []).map(normalizeChapterSectionPlan)
       }))
     : fallback.chapterPlans;
+
+  const plotlines = Array.isArray(source.plotlines) && source.plotlines.length
+    ? source.plotlines.map((item, index) =>
+        normalizePlotline(item, index, fallback.plotlines[index])
+      )
+    : fallback.plotlines;
 
   const volumes = Array.isArray(source.volumes) && source.volumes.length
     ? source.volumes.map((item, index) => ({
@@ -592,9 +945,11 @@ function normalizeBlueprintResult(raw, setup, fallback = buildFallbackBlueprint(
     hook: String(source.hook || fallback.hook),
     synopsis: String(source.synopsis || fallback.synopsis),
     worldSetting: String(source.worldSetting || fallback.worldSetting),
+    storyBible: normalizeStoryBible(source.storyBible, fallback.storyBible),
     characters,
     mainPlot: String(source.mainPlot || fallback.mainPlot),
     subPlots: toStringList(source.subPlots, fallback.subPlots),
+    plotlines,
     volumes,
     chapterPlans
   };
@@ -656,33 +1011,119 @@ function buildBlueprintMessages(payload) {
             hook: "string",
             synopsis: "string",
             worldSetting: "string",
+            storyBible: {
+              theme: "string",
+              narrativeStyle: "string",
+              timelineRules: "string",
+              taboos: ["string"],
+              continuityRules: ["string"]
+            },
             characters: [
               {
                 id: "string",
                 name: "string",
                 role: "string",
+                identity: "string",
                 personality: "string",
                 goal: "string",
                 conflict: "string",
                 traits: ["string"],
-                relationships: ["string"]
+                relationships: ["string"],
+                desire: "string",
+                fear: "string",
+                wound: "string",
+                secret: "string",
+                ability: "string",
+                limitation: "string",
+                relationEdges: [
+                  {
+                    id: "string",
+                    targetCharacterId: "string",
+                    targetCharacterName: "string",
+                    type: "string",
+                    dynamic: "string"
+                  }
+                ],
+                arc: [
+                  {
+                    id: "string",
+                    stage: "string",
+                    change: "string",
+                    trigger: "string",
+                    payoff: "string"
+                  }
+                ]
               }
             ],
             mainPlot: "string",
             subPlots: ["string"],
+            plotlines: [
+              {
+                id: "string",
+                type: "main | subplot | relationship | rivalry | mystery",
+                title: "string",
+                goal: "string",
+                ownerCharacterIds: ["string"],
+                dependencies: ["string"],
+                reveals: ["string"],
+                foreshadows: ["string"],
+                payoff: "string",
+                status: "planned",
+                beats: [
+                  {
+                    id: "string",
+                    title: "string",
+                    summary: "string",
+                    type: "string",
+                    chapterIndex: 1,
+                    sectionId: "string",
+                    ownerCharacterIds: ["string"],
+                    participantCharacterIds: ["string"],
+                    dependencyBeatIds: ["string"],
+                    reveals: ["string"],
+                    foreshadows: ["string"],
+                    payoff: "string",
+                    status: "planned"
+                  }
+                ]
+              }
+            ],
             volumes: [{ title: "string", summary: "string" }],
             chapterPlans: [
               {
                 index: 1,
                 title: "string",
                 goal: "string",
-                turningPoint: "string"
+                turningPoint: "string",
+                plotBeatIds: ["string"],
+                characterArcIds: ["string"],
+                tensionCurve: "string",
+                sections: [
+                  {
+                    id: "string",
+                    index: 1,
+                    title: "string",
+                    sceneGoal: "string",
+                    pov: "string",
+                    location: "string",
+                    participants: ["string"],
+                    conflict: "string",
+                    outcome: "string",
+                    hooks: ["string"],
+                    plotBeatIds: ["string"],
+                    characterArcIds: ["string"],
+                    status: "planned"
+                  }
+                ]
               }
             ]
           },
           constraints: [
             "必须是中文",
             "适合长篇连载",
+            "角色必须包含动机、恐惧、创伤、秘密、能力、限制、关系边和成长轨迹",
+            "plotlines 必须把主线、关键支线和角色线拆成可追踪事件节点",
+            "chapterPlans.sections 每章至少 2 到 4 节，每节必须有场景目标、冲突、结果和钩子",
             "chapterPlans 至少给出 10 章",
             "volumes 给出 3 卷左右",
             "不要空字段"

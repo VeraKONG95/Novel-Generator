@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { CheckIcon, DownloadIcon, FileTextIcon, RotateCcwIcon, XIcon } from 'lucide-react';
 import { Chapter } from '../../types';
+import { useDialogAccessibility } from '../../hooks/useDialogAccessibility';
 
 export interface ExportSelection {
   includeOutline: boolean;
@@ -20,6 +21,7 @@ export function ExportModal({
   onExport,
   onClose
 }: ExportModalProps) {
+  const dialogRef = useDialogAccessibility(onClose);
   const [includeOutline, setIncludeOutline] = useState(outlineAvailable);
   const [selectedChapterIds, setSelectedChapterIds] = useState<string[]>(chapters.map((chapter) => chapter.id));
   const [isExporting, setIsExporting] = useState(false);
@@ -72,6 +74,11 @@ export function ExportModal({
       style={{ background: 'rgba(0,0,0,0.4)', backdropFilter: 'blur(6px)' }}
     >
       <div
+        ref={dialogRef}
+        tabIndex={-1}
+        role="dialog"
+        aria-modal="true"
+        aria-label="导出小说"
         className="rounded-2xl overflow-hidden flex flex-col"
         style={{
           background: '#FFFFFF',
@@ -96,6 +103,7 @@ export function ExportModal({
           </div>
           <button
             onClick={onClose}
+            aria-label="关闭导出窗口"
             className="p-2 rounded-lg transition-colors"
             style={{ color: '#8B8B9E' }}
             onMouseEnter={(e) => (e.currentTarget as HTMLElement).style.background = '#F0F0F5'}

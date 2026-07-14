@@ -1,7 +1,7 @@
 import { Chapter, Character, DraftProjectSummary, NovalMemory, NovalProject, Project, RecentProjectSummary, WorldSetting } from '../types';
 
 const RECENT_PROJECTS_KEY = 'noval.recentProjects';
-const PROJECT_SCHEMA_VERSION = 2;
+const PROJECT_SCHEMA_VERSION = 4;
 
 function nowIso() {
   return new Date().toISOString();
@@ -24,19 +24,30 @@ export function createDefaultProject(seed?: {
   title?: string;
   genre?: string;
   description?: string;
+  audience?: string;
+  tone?: string;
+  narrativePerspective?: string;
+  creationMode?: string;
+  taboos?: string;
+  targetWords?: number;
 }): NovalProject {
   const timestamp = nowIso();
   return {
     schemaVersion: PROJECT_SCHEMA_VERSION,
     id: `noval-${Date.now()}`,
     title: seed?.title?.trim() || '未命名小说',
+    agents: '',
+    creationMode: seed?.creationMode || '平衡型',
+    importStatus: '',
+    constitutionStatus: 'draft',
     createdAt: timestamp,
     updatedAt: timestamp,
     setup: {
       genre: seed?.genre?.trim() || '未分类',
-      audience: '面向长篇网文读者',
-      tone: '细腻',
-      targetWords: 120000,
+      audience: seed?.audience?.trim() || '面向长篇网文读者',
+      tone: seed?.tone?.trim() || '细腻',
+      narrativePerspective: seed?.narrativePerspective?.trim() || '第三人称限知',
+      targetWords: seed?.targetWords || 120000,
       premise: seed?.description?.trim() || '从一个强冲突开场，逐步展开角色命运与主线谜团。',
       worldBackground: '',
       protagonist: '',
@@ -48,9 +59,17 @@ export function createDefaultProject(seed?: {
       hook: '',
       synopsis: seed?.description?.trim() || '',
       worldSetting: '',
+      storyBible: {
+        theme: '',
+        narrativeStyle: seed?.tone?.trim() || '细腻',
+        timelineRules: '',
+        taboos: seed?.taboos?.split(/[；;\n]/).map((item) => item.trim()).filter(Boolean) || [],
+        continuityRules: ['章节结尾保留推进点', '避免纯解释性旁白']
+      },
       characters: [],
       mainPlot: '',
       subPlots: [],
+      plotlines: [],
       volumes: [],
       chapterPlans: []
     },
@@ -61,7 +80,28 @@ export function createDefaultProject(seed?: {
       includeChapterSummaries: true,
       includeAppendix: true
     },
-    memory: emptyMemory()
+    memory: emptyMemory(),
+    storyState: emptyStoryState(),
+    documents: {
+      characterArchive: '',
+      stagePlan: '',
+      chapterPlan: '',
+      styleGuide: '',
+      importArchive: ''
+    }
+  };
+}
+
+function emptyStoryState() {
+  return {
+    currentTimeline: '',
+    activePlotlineIds: [],
+    unresolvedConflicts: [],
+    knownFacts: [],
+    hiddenFacts: [],
+    characterStates: [],
+    foreshadowingRegistry: [],
+    continuityConstraints: []
   };
 }
 
@@ -300,11 +340,23 @@ export function applyCharactersToProject(project: NovalProject, characters: Char
         id: character.id || `char-${index + 1}`,
         name: character.name || `角色${index + 1}`,
         role: character.occupation || '角色',
+        identity: character.occupation || '角色',
         personality: character.personality.join('、'),
         goal: character.customNote || '',
         conflict: character.customNote ? `补充设定：${character.customNote}` : '',
         traits: character.personality.slice(0, 4),
-        relationships: []
+        relationships: [],
+        desire: character.customNote || '',
+        fear: '',
+        wound: '',
+        secret: '',
+        ability: '',
+        limitation: character.customNote ? `补充设定：${character.customNote}` : '',
+        bottomLine: '',
+        voice: '',
+        finalDirection: '',
+        relationEdges: [],
+        arc: []
       }))
     }
   };
@@ -351,12 +403,9 @@ export function applyWritingStyleToProject(project: NovalProject, writingStyle: 
 }
 
 export function buildOutlineContent(project: NovalProject) {
-  if (project.blueprint.mainPlot) {
-    return project.blueprint.mainPlot;
-  }
-
-  if (project.blueprint.synopsis) {
-    return project.blueprint.synopsis;
+  const mainPlot = String(project.blueprint.mainPlot || '').trim();
+  if (mainPlot && !/^(待补充|待规划|暂无记录)[。.]?$/.test(mainPlot)) {
+    return mainPlot;
   }
 
   if (project.blueprint.chapterPlans.length) {
@@ -458,7 +507,9 @@ export function mergeProjectMemory(current: NovalMemory, incoming?: Partial<Nova
         name: String(item?.name || `${section}-${index + 1}`),
         content: String(item?.content || ''),
         updatedAt: String(item?.updatedAt || nowIso()),
-        sourceChapter: item?.sourceChapter
+        sourceChapter: item?.sourceChapter,
+        sourceExcerpt: item?.sourceExcerpt,
+        status: item?.status
       };
       const identity = `${section}:${normalized.name.toLowerCase()}:${normalized.sourceChapter || ''}`;
       merged.set(identity, normalized);

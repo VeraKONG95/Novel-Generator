@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, utilityProcess } = require("electron");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const {
@@ -6,28 +6,36 @@ const {
   normalizeProject
 } = require("./services/project-schema");
 const {
-  buildChapterAnalysisMessages,
-  buildBlueprintMessages,
-  buildChapterMessages,
-  buildFallbackBlueprint,
-  buildFallbackChapterAnalysis,
-  buildFallbackChapter,
-  buildFallbackProjectMemory,
-  buildFallbackRewriteResult,
-  buildProjectMemoryRefreshMessages,
-  buildRewriteMessages,
-  extractJSONObject,
-  normalizeBlueprintResult,
-  normalizeChapterAnalysisResult,
-  normalizeChapterResult,
-  normalizeMemoryRefreshResult,
-  normalizeRewriteResult,
-  safeErrorMessage
-} = require("./services/story-engine");
+  assertInside,
+  applyWorkspaceChanges,
+  createWorkspace,
+  createWorkspaceAtPath,
+  importNovel,
+  listDocuments,
+  listWorkspaceFiles,
+  loadWorkspace,
+  readWorkspaceFile,
+  saveWorkspace
+} = require("./services/workspace-service");
+const { TaskManager } = require("./services/task-manager");
+const { classifyTask } = require("./services/pi-prompts");
+
+if (process.env.NOVAL_USER_DATA_DIR) {
+  app.setPath("userData", path.resolve(process.env.NOVAL_USER_DATA_DIR));
+}
 
 const SETTINGS_PATH = () => path.join(app.getPath("userData"), "settings.json");
 const AUTOSAVE_PATH = () => path.join(app.getPath("userData"), "autosave-recovery.json");
 const DRAFTS_DIR = () => path.join(app.getPath("userData"), "draft-projects");
+
+let mainWindow = null;
+let taskManager = null;
+let workspaceWatcher = null;
+let workspaceWriteUntil = 0;
+
+function safeErrorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
 
 async function ensureParentDir(filePath) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
@@ -100,52 +108,17 @@ async function listDraftSummaries() {
 async function readSettings() {
   return (
     (await readJSONFile(SETTINGS_PATH())) || {
-      provider: "openai-compatible",
+      provider: "openrouter",
       apiKey: "",
-      baseUrl: "https://api.openai.com/v1",
-      model: "gpt-4.1-mini"
+      baseUrl: "https://openrouter.ai/api/v1",
+      model: "deepseek/deepseek-v4-flash",
+      contextWindow: 1048576,
+      maxOutputTokens: 65536,
+      capabilityStatus: "unchecked",
+      capabilityCheckedAt: "",
+      capabilityMessage: ""
     }
   );
-}
-
-function normalizedBaseUrl(baseUrl) {
-  return String(baseUrl || "https://api.openai.com/v1").replace(/\/+$/, "");
-}
-
-async function requestChatCompletion({ settings, messages, temperature = 0.7 }) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 60_000);
-
-  try {
-    const response = await fetch(`${normalizedBaseUrl(settings.baseUrl)}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${settings.apiKey}`
-      },
-      body: JSON.stringify({
-        model: settings.model,
-        temperature,
-        messages
-      }),
-      signal: controller.signal
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`模型请求失败 (${response.status})：${errorText.slice(0, 400)}`);
-    }
-
-    const data = await response.json();
-    const content = data?.choices?.[0]?.message?.content;
-    if (!content) {
-      throw new Error("模型没有返回可用内容。");
-    }
-
-    return content;
-  } finally {
-    clearTimeout(timeout);
-  }
 }
 
 async function resolveRendererEntry() {
@@ -166,14 +139,131 @@ async function resolveRendererEntry() {
     };
   } catch {
     return {
-      type: "file",
-      value: path.join(__dirname, "src", "index.html")
+      type: "error",
+      value: "应用界面尚未构建，请先运行 npm run build。"
     };
   }
 }
 
+async function startWorkspaceWatcher(root) {
+  if (workspaceWatcher) {
+    await workspaceWatcher.close();
+    workspaceWatcher = null;
+  }
+  if (!root) return;
+  const { watch } = await import("chokidar");
+  let timer = null;
+  const changed = new Set();
+  workspaceWatcher = watch(root, {
+    ignoreInitial: true,
+    ignored: [
+      /(^|[/\\])\.noval[/\\](?:\.stage-|\.backup-)/,
+      /(^|[/\\])\.noval[/\\]tasks[/\\]/,
+      /(^|[/\\])\.noval[/\\]index\.json$/,
+      /(^|[/\\])\.noval[/\\]transaction\.json$/
+    ],
+    awaitWriteFinish: { stabilityThreshold: 250, pollInterval: 50 }
+  });
+  const onChange = (filePath) => {
+    if (Date.now() < workspaceWriteUntil) return;
+    const relativePath = path.relative(root, filePath);
+    if (!relativePath || relativePath.startsWith("..")) return;
+    changed.add(relativePath);
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      const paths = Array.from(changed);
+      changed.clear();
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send("workspace:externalChange", { root, paths });
+      }
+    }, 300);
+  };
+  workspaceWatcher.on("add", onChange);
+  workspaceWatcher.on("change", onChange);
+  workspaceWatcher.on("unlink", onChange);
+}
+
+function virtualDocuments(project) {
+  const documents = [
+    { id: "AGENTS.md", title: "创作章程", content: String(project.agents || "") },
+    {
+      id: "outline/book.md",
+      title: "全书蓝图",
+      content: JSON.stringify(project.blueprint || {}, null, 2)
+    }
+  ];
+  (project.blueprint?.characters || []).forEach((character) => {
+    documents.push({
+      id: `character:${character.id}`,
+      title: `人物：${character.name}`,
+      content: JSON.stringify(character, null, 2)
+    });
+  });
+  (project.chapters || []).forEach((chapter) => {
+    documents.push({
+      id: `chapter:${chapter.id}`,
+      title: `第 ${chapter.index} 章 ${chapter.title}`,
+      content: String(chapter.content || "")
+    });
+  });
+  return documents;
+}
+
+function fitTaskContext(context, settings) {
+  const contextWindow = Number(settings?.contextWindow) || 128000;
+  const maxOutputTokens = Number(settings?.maxOutputTokens) || 16384;
+  const inputTokenBudget = contextWindow - maxOutputTokens - 4000;
+  if (inputTokenBudget < 4000) {
+    throw new Error("模型上下文容量不足，或单次输出上限设置得过大。请调整模型设置。" );
+  }
+  const charBudget = Math.floor(inputTokenBudget * 1.2);
+  const next = structuredClone(context);
+  next.documentDirectory = (next.documents || []).map((item) => ({ id: item.id, title: item.title }));
+  const size = () => JSON.stringify({
+    agents: next.agents,
+    materials: next.materials,
+    memory: next.memory,
+    recentChapters: next.recentChapters,
+    conversationHistory: next.conversationHistory,
+    documentDirectory: next.documentDirectory
+  }).length;
+  const sections = Object.keys(next.memory || {});
+  while (size() > charBudget && next.documentDirectory.length > 30) {
+    next.documentDirectory = next.documentDirectory.slice(-Math.max(30, Math.ceil(next.documentDirectory.length / 2)));
+  }
+  while (size() > charBudget && sections.some((key) => (next.memory[key] || []).length > 8)) {
+    for (const key of sections) {
+      const items = next.memory[key] || [];
+      if (items.length > 8) next.memory[key] = items.slice(-Math.max(8, Math.ceil(items.length / 2)));
+    }
+  }
+  while (size() > charBudget && next.recentChapters.length > 1) next.recentChapters.shift();
+  while (size() > charBudget && next.conversationHistory.length > 8) next.conversationHistory.shift();
+  if (size() > charBudget) {
+    throw new Error("创作章程、当前目标和必要冲突资料已超过模型可处理范围；任务没有静默截断。请使用更大上下文的模型。" );
+  }
+  return next;
+}
+
+async function buildTaskContext(project, workspaceRoot, target, settings, conversationHistory = []) {
+  const documents = workspaceRoot
+    ? await listDocuments(workspaceRoot)
+    : virtualDocuments(project);
+  return fitTaskContext({
+    agents: String(project.agents || "尚未建立创作章程。"),
+    materials: {
+      project: { id: project.id, title: project.title },
+      target
+    },
+    memory: {},
+    recentChapters: [],
+    conversationHistory: Array.isArray(conversationHistory) ? conversationHistory.slice(-40) : [],
+    documents
+  }, settings);
+}
+
 async function createWindow() {
-  const mainWindow = new BrowserWindow({
+  mainWindow = new BrowserWindow({
     width: 1440,
     height: 920,
     minWidth: 1100,
@@ -190,6 +280,13 @@ async function createWindow() {
   const entry = await resolveRendererEntry();
   if (entry.type === "url") {
     await mainWindow.loadURL(entry.value);
+    return;
+  }
+
+  if (entry.type === "error") {
+    await mainWindow.loadURL(
+      `data:text/html;charset=utf-8,${encodeURIComponent(`<main style="font-family:sans-serif;padding:40px"><h1>Noval 无法启动</h1><p>${entry.value}</p></main>`)}`
+    );
     return;
   }
 
@@ -280,6 +377,168 @@ ipcMain.handle("project:openPath", async (_event, { filePath }) => {
       canceled: false,
       error: safeErrorMessage(error)
     };
+  }
+});
+
+ipcMain.handle("workspace:chooseCreatePath", async () => {
+  const { canceled, filePaths } = await dialog.showOpenDialog({
+    title: "选择新项目文件夹",
+    buttonLabel: "使用此文件夹",
+    properties: ["openDirectory", "createDirectory", "promptToCreate"]
+  });
+  return canceled || !filePaths[0]
+    ? { canceled: true }
+    : { canceled: false, filePath: filePaths[0] };
+});
+
+ipcMain.handle("workspace:create", async (_event, { project, root }) => {
+  if (!root) return { canceled: false, error: "请填写项目文件地址。" };
+  try {
+    workspaceWriteUntil = Date.now() + 1500;
+    const result = await createWorkspaceAtPath(root, project);
+    await startWorkspaceWatcher(result.root);
+    await taskManager?.loadWorkspaceTasks(result.root);
+    return { canceled: false, filePath: result.root, ...result };
+  } catch (error) {
+    return { canceled: false, error: safeErrorMessage(error) };
+  }
+});
+
+ipcMain.handle("workspace:open", async () => {
+  const { canceled, filePaths } = await dialog.showOpenDialog({
+    title: "打开小说创作空间",
+    properties: ["openDirectory"]
+  });
+  if (canceled || !filePaths[0]) return { canceled: true };
+  try {
+    const result = await loadWorkspace(filePaths[0]);
+    await startWorkspaceWatcher(result.root);
+    const tasks = await taskManager?.loadWorkspaceTasks(result.root);
+    return { canceled: false, filePath: result.root, ...result, tasks: tasks || [] };
+  } catch (error) {
+    return { canceled: false, error: safeErrorMessage(error) };
+  }
+});
+
+ipcMain.handle("workspace:openPath", async (_event, { root }) => {
+  if (!root) return { error: "缺少创作空间路径。" };
+  try {
+    const result = await loadWorkspace(root);
+    await startWorkspaceWatcher(result.root);
+    const tasks = await taskManager?.loadWorkspaceTasks(result.root);
+    return { canceled: false, filePath: result.root, ...result, tasks: tasks || [] };
+  } catch (error) {
+    return { canceled: false, error: safeErrorMessage(error) };
+  }
+});
+
+ipcMain.handle(
+  "workspace:save",
+  async (_event, { root, project, expectedRevisions, force = false }) => {
+    if (!root) return { ok: false, error: "当前项目还没有创作空间。" };
+    try {
+      workspaceWriteUntil = Date.now() + 1500;
+      const result = await saveWorkspace(root, project, { expectedRevisions, force });
+      if (!result.ok) return result;
+      return { ok: true, filePath: root, ...result };
+    } catch (error) {
+      return { ok: false, error: safeErrorMessage(error) };
+    }
+  }
+);
+
+ipcMain.handle("workspace:reload", async (_event, { root }) => {
+  try {
+    const result = await loadWorkspace(root);
+    return { ok: true, filePath: root, ...result };
+  } catch (error) {
+    return { ok: false, error: safeErrorMessage(error) };
+  }
+});
+
+ipcMain.handle("workspace:listFiles", async (_event, { root }) => {
+  try {
+    return { ok: true, data: await listWorkspaceFiles(root) };
+  } catch (error) {
+    return { ok: false, error: safeErrorMessage(error), data: [] };
+  }
+});
+
+ipcMain.handle("workspace:readFile", async (_event, { root, relativePath }) => {
+  try {
+    return { ok: true, data: await readWorkspaceFile(root, relativePath) };
+  } catch (error) {
+    return { ok: false, error: safeErrorMessage(error) };
+  }
+});
+
+ipcMain.handle("workspace:mergeConflict", async (_event, { root, relativePath, content }) => {
+  try {
+    if (!root || !relativePath) return { ok: false, error: "缺少冲突文件信息。" };
+    const target = assertInside(root, path.join(root, relativePath));
+    workspaceWriteUntil = Date.now() + 1500;
+    await ensureParentDir(target);
+    await fs.writeFile(target, String(content || ""), "utf8");
+    const result = await loadWorkspace(root);
+    return { ok: true, filePath: root, ...result };
+  } catch (error) {
+    return { ok: false, error: safeErrorMessage(error) };
+  }
+});
+
+ipcMain.handle("workspace:importLegacy", async () => {
+  const source = await dialog.showOpenDialog({
+    title: "选择旧版小说项目",
+    properties: ["openFile"],
+    filters: [{ name: "Noval JSON", extensions: ["json"] }]
+  });
+  if (source.canceled || !source.filePaths[0]) return { canceled: true };
+  const destination = await dialog.showOpenDialog({
+    title: "选择新创作空间的保存位置",
+    properties: ["openDirectory", "createDirectory"]
+  });
+  if (destination.canceled || !destination.filePaths[0]) return { canceled: true };
+  try {
+    const raw = JSON.parse(await fs.readFile(source.filePaths[0], "utf8"));
+    const project = normalizeProject(raw).project;
+    workspaceWriteUntil = Date.now() + 1500;
+    const result = await createWorkspace(destination.filePaths[0], project);
+    await startWorkspaceWatcher(result.root);
+    return {
+      canceled: false,
+      filePath: result.root,
+      ...result,
+      migration: { sourcePath: source.filePaths[0], sourcePreserved: true }
+    };
+  } catch (error) {
+    return { canceled: false, error: safeErrorMessage(error) };
+  }
+});
+
+ipcMain.handle("workspace:importNovel", async (_event, { project }) => {
+  const source = await dialog.showOpenDialog({
+    title: "选择已有小说正文",
+    properties: ["openFile"],
+    filters: [{ name: "文本或 Markdown", extensions: ["txt", "md", "markdown"] }]
+  });
+  if (source.canceled || !source.filePaths[0]) return { canceled: true };
+  const destination = await dialog.showOpenDialog({
+    title: "选择新创作空间的保存位置",
+    properties: ["openDirectory", "createDirectory"]
+  });
+  if (destination.canceled || !destination.filePaths[0]) return { canceled: true };
+  try {
+    workspaceWriteUntil = Date.now() + 1500;
+    const result = await importNovel(destination.filePaths[0], source.filePaths[0], project);
+    await startWorkspaceWatcher(result.root);
+    return {
+      canceled: false,
+      filePath: result.root,
+      ...result,
+      import: { sourcePath: source.filePaths[0], requiresArchiveConfirmation: true }
+    };
+  } catch (error) {
+    return { canceled: false, error: safeErrorMessage(error) };
   }
 });
 
@@ -401,15 +660,162 @@ ipcMain.handle("settings:save", async (_event, settings) => {
   return { ok: true };
 });
 
+ipcMain.handle("model:probe", async (_event, settings) => {
+  if (!taskManager) return { ok: false, error: "Pi 后台尚未准备完成。" };
+  try {
+    return await taskManager.probe(settings);
+  } catch (error) {
+    return { ok: false, error: safeErrorMessage(error) };
+  }
+});
+
+ipcMain.handle("task:start", async (_event, payload) => {
+  if (!taskManager) return { ok: false, error: "Pi 后台尚未准备完成。" };
+  try {
+    const project = normalizeProject(payload.project).project;
+    project.agents = String(payload.project?.agents || "");
+    project.creationMode = String(payload.project?.creationMode || "平衡型");
+    const taskType = payload.taskType || classifyTask(payload.instruction, payload.target?.docType);
+    const taskSettings = await readSettings();
+    if (taskSettings.capabilityStatus !== "ready") {
+      return { ok: false, error: "当前模型尚未通过完整创作能力检查。" };
+    }
+    const context = await buildTaskContext(project, payload.workspaceRoot || "", payload.target, taskSettings, payload.conversationHistory);
+    const task = await taskManager.start({
+      taskType,
+      instruction: payload.instruction,
+      target: payload.target,
+      context,
+      settings: taskSettings,
+      baseRevisions: payload.expectedRevisions || {},
+      workspaceRoot: payload.workspaceRoot || "",
+      projectId: project.id,
+      conversationId: payload.conversationId,
+      conversationTitle: payload.conversationTitle
+    });
+    return { ok: true, task };
+  } catch (error) {
+    return { ok: false, error: safeErrorMessage(error) };
+  }
+});
+
+ipcMain.handle("task:stop", async (_event, { taskId }) => {
+  try {
+    const task = await taskManager?.stop(taskId);
+    return task ? { ok: true, task } : { ok: false, error: "任务不存在。" };
+  } catch (error) {
+    return { ok: false, error: safeErrorMessage(error) };
+  }
+});
+
+ipcMain.handle("task:answer", async (_event, payload) => {
+  if (!taskManager) return { ok: false, error: "Pi 后台尚未准备完成。" };
+  try {
+    const project = normalizeProject(payload.project).project;
+    project.agents = String(payload.project?.agents || "");
+    const settings = await readSettings();
+    if (settings.capabilityStatus !== "ready") {
+      return { ok: false, error: "当前模型尚未通过完整创作能力检查。" };
+    }
+    const context = await buildTaskContext(project, payload.workspaceRoot || "", payload.target, settings, payload.conversationHistory);
+    const task = await taskManager.answer(payload.taskId, payload.answer, { context, settings });
+    return { ok: true, task };
+  } catch (error) {
+    return { ok: false, error: safeErrorMessage(error) };
+  }
+});
+
+ipcMain.handle("task:list", async (_event, { projectId, workspaceRoot }) => {
+  try {
+    if (workspaceRoot) await taskManager?.loadWorkspaceTasks(workspaceRoot);
+    return { ok: true, data: taskManager?.list(projectId) || [] };
+  } catch (error) {
+    return { ok: false, error: safeErrorMessage(error), data: [] };
+  }
+});
+
+ipcMain.handle("task:get", async (_event, { taskId }) => {
+  const task = taskManager?.get(taskId);
+  return task ? { ok: true, data: task } : { ok: false, error: "任务不存在。" };
+});
+
+ipcMain.handle("task:confirm", async (_event, payload) => {
+  try {
+    const pendingTask = taskManager?.get(payload.taskId);
+    if (!pendingTask || pendingTask.status !== "awaiting_confirmation") {
+      return { ok: false, error: "当前任务不在等待确认状态，正式作品没有修改。" };
+    }
+    let saveResult = null;
+    const candidateChanges = Array.isArray(payload.changes)
+      ? payload.changes
+      : pendingTask.result?.kind === "candidate" && Array.isArray(pendingTask.result?.changes)
+        ? pendingTask.result.changes
+        : [];
+    if (payload.workspaceRoot && candidateChanges.length) {
+      workspaceWriteUntil = Date.now() + 1500;
+      saveResult = await applyWorkspaceChanges(payload.workspaceRoot, candidateChanges, {
+        expectedRevisions: pendingTask.baseRevisions || payload.expectedRevisions || {},
+        force: Boolean(payload.force)
+      });
+      if (!saveResult.ok) return saveResult;
+    } else if (payload.workspaceRoot && payload.project) {
+      workspaceWriteUntil = Date.now() + 1500;
+      saveResult = await saveWorkspace(payload.workspaceRoot, payload.project, {
+        expectedRevisions: pendingTask.baseRevisions || payload.expectedRevisions || {},
+        force: Boolean(payload.force)
+      });
+      if (!saveResult.ok) return saveResult;
+    }
+    const task = await taskManager.decide(payload.taskId, "accept");
+    return {
+      ok: true,
+      task,
+      data: saveResult?.data || payload.project,
+      revisions: saveResult?.revisions || payload.expectedRevisions || {}
+    };
+  } catch (error) {
+    return { ok: false, error: safeErrorMessage(error) };
+  }
+});
+
+ipcMain.handle("task:reject", async (_event, { taskId }) => {
+  try {
+    return { ok: true, task: await taskManager.decide(taskId, "reject") };
+  } catch (error) {
+    return { ok: false, error: safeErrorMessage(error) };
+  }
+});
+
+ipcMain.handle("task:abandon", async (_event, { taskId }) => {
+  try {
+    return { ok: true, task: await taskManager.abandon(taskId) };
+  } catch (error) {
+    return { ok: false, error: safeErrorMessage(error) };
+  }
+});
+
 ipcMain.handle("autosave:save", async (_event, payload) => {
   const filePath = AUTOSAVE_PATH();
-  const normalized = normalizeAutosaveSnapshot({
-    savedAt: new Date().toISOString(),
-    currentPath: String(payload?.currentPath || ""),
-    currentChapterId: String(payload?.currentChapterId || ""),
-    route: String(payload?.route || "home"),
-    project: payload?.project || null
-  });
+  const currentPath = String(payload?.currentPath || "");
+  const isWorkspace = Boolean(currentPath && !currentPath.toLowerCase().endsWith(".json"));
+  const normalized = isWorkspace
+    ? {
+        snapshot: {
+          savedAt: new Date().toISOString(),
+          currentPath,
+          currentChapterId: String(payload?.currentChapterId || ""),
+          route: String(payload?.route || "home"),
+          project: null
+        },
+        meta: { migrated: false }
+      }
+    : normalizeAutosaveSnapshot({
+        savedAt: new Date().toISOString(),
+        currentPath,
+        currentChapterId: String(payload?.currentChapterId || ""),
+        route: String(payload?.route || "home"),
+        project: payload?.project || null
+      });
 
   await ensureParentDir(filePath);
   await fs.writeFile(filePath, JSON.stringify(normalized.snapshot, null, 2), "utf8");
@@ -422,13 +828,14 @@ ipcMain.handle("autosave:save", async (_event, payload) => {
 
 ipcMain.handle("autosave:load", async () => {
   const snapshot = await readJSONFile(AUTOSAVE_PATH());
-  if (!snapshot?.project) {
+  if (!snapshot?.project && !snapshot?.currentPath) {
     return {
       ok: true,
       data: null
     };
   }
 
+  if (!snapshot.project && snapshot.currentPath) return { ok: true, data: snapshot, meta: { migrated: false } };
   try {
     const normalized = normalizeAutosaveSnapshot(snapshot);
     return {
@@ -474,187 +881,17 @@ ipcMain.handle("export:document", async (_event, { format, defaultName, content 
   return { canceled: false, filePath };
 });
 
-ipcMain.handle("generation:blueprint", async (_event, payload) => {
-  const settings = await readSettings();
-  const fallback = buildFallbackBlueprint(payload?.setup || {});
-
-  if (!settings.apiKey) {
-    return {
-      ok: true,
-      mode: "fallback",
-      reason: "missing_api_key",
-      data: fallback
-    };
-  }
-
-  try {
-    const content = await requestChatCompletion({
-      settings,
-      messages: buildBlueprintMessages(payload),
-      temperature: 0.8
-    });
-    const parsed = extractJSONObject(content);
-    return {
-      ok: true,
-      mode: "api",
-      data: normalizeBlueprintResult(parsed, payload?.setup || {}, fallback)
-    };
-  } catch (error) {
-    return {
-      ok: true,
-      mode: "fallback",
-      reason: "api_error",
-      warning: safeErrorMessage(error),
-      data: fallback
-    };
-  }
-});
-
-ipcMain.handle("generation:chapter", async (_event, payload) => {
-  const settings = await readSettings();
-  const fallback = buildFallbackChapter(payload);
-
-  if (!settings.apiKey) {
-    return {
-      ok: true,
-      mode: "fallback",
-      reason: "missing_api_key",
-      data: fallback
-    };
-  }
-
-  try {
-    const content = await requestChatCompletion({
-      settings,
-      messages: buildChapterMessages(payload),
-      temperature: payload?.isContinuation ? 0.85 : 0.75
-    });
-    const parsed = extractJSONObject(content);
-    return {
-      ok: true,
-      mode: "api",
-      data: normalizeChapterResult(parsed, payload, fallback)
-    };
-  } catch (error) {
-    return {
-      ok: true,
-      mode: "fallback",
-      reason: "api_error",
-      warning: safeErrorMessage(error),
-      data: fallback
-    };
-  }
-});
-
-ipcMain.handle("analysis:chapter", async (_event, payload) => {
-  const settings = await readSettings();
-  const fallback = buildFallbackChapterAnalysis(payload);
-
-  if (!settings.apiKey) {
-    return {
-      ok: true,
-      mode: "fallback",
-      reason: "missing_api_key",
-      data: fallback
-    };
-  }
-
-  try {
-    const content = await requestChatCompletion({
-      settings,
-      messages: buildChapterAnalysisMessages(payload),
-      temperature: 0.3
-    });
-    const parsed = extractJSONObject(content);
-    return {
-      ok: true,
-      mode: "api",
-      data: normalizeChapterAnalysisResult(parsed, payload, fallback)
-    };
-  } catch (error) {
-    return {
-      ok: true,
-      mode: "fallback",
-      reason: "api_error",
-      warning: safeErrorMessage(error),
-      data: fallback
-    };
-  }
-});
-
-ipcMain.handle("memory:refresh", async (_event, payload) => {
-  const settings = await readSettings();
-  const fallback = buildFallbackProjectMemory(payload?.project || {});
-
-  if (!settings.apiKey) {
-    return {
-      ok: true,
-      mode: "fallback",
-      reason: "missing_api_key",
-      data: fallback
-    };
-  }
-
-  try {
-    const content = await requestChatCompletion({
-      settings,
-      messages: buildProjectMemoryRefreshMessages(payload),
-      temperature: 0.25
-    });
-    const parsed = extractJSONObject(content);
-    return {
-      ok: true,
-      mode: "api",
-      data: normalizeMemoryRefreshResult(parsed, payload, fallback)
-    };
-  } catch (error) {
-    return {
-      ok: true,
-      mode: "fallback",
-      reason: "api_error",
-      warning: safeErrorMessage(error),
-      data: fallback
-    };
-  }
-});
-
-ipcMain.handle("rewrite:text", async (_event, payload) => {
-  const settings = await readSettings();
-  const fallback = buildFallbackRewriteResult(payload);
-
-  if (!settings.apiKey) {
-    return {
-      ok: true,
-      mode: "fallback",
-      reason: "missing_api_key",
-      data: fallback
-    };
-  }
-
-  try {
-    const content = await requestChatCompletion({
-      settings,
-      messages: buildRewriteMessages(payload),
-      temperature: payload?.mode === "rewrite_chapter" ? 0.7 : 0.5
-    });
-    const parsed = extractJSONObject(content);
-    return {
-      ok: true,
-      mode: "api",
-      data: normalizeRewriteResult(parsed, payload, fallback)
-    };
-  } catch (error) {
-    return {
-      ok: true,
-      mode: "fallback",
-      reason: "api_error",
-      warning: safeErrorMessage(error),
-      data: fallback
-    };
-  }
-});
-
 app.whenReady().then(() => {
+  taskManager = new TaskManager({
+    utilityProcess,
+    workerPath: path.join(__dirname, "services", "pi-worker.mjs"),
+    userDataDir: app.getPath("userData"),
+    onEvent: (payload) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send("task:event", payload);
+      }
+    }
+  });
   createWindow();
 
   app.on("activate", () => {
@@ -662,6 +899,11 @@ app.whenReady().then(() => {
       createWindow();
     }
   });
+});
+
+app.on("before-quit", () => {
+  if (workspaceWatcher) void workspaceWatcher.close();
+  if (taskManager?.worker) taskManager.worker.kill();
 });
 
 app.on("window-all-closed", () => {
