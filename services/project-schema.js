@@ -1,4 +1,4 @@
-const PROJECT_SCHEMA_VERSION = 4;
+const PROJECT_SCHEMA_VERSION = 5;
 
 function timestamp(value) {
   return String(value || new Date().toISOString());
@@ -77,6 +77,22 @@ function defaultDocuments() {
   };
 }
 
+function defaultAnalysis() {
+  return {
+    status: "uninitialized",
+    runId: "",
+    generationId: "",
+    workflowId: "",
+    blockingGaps: [],
+    nonBlockingGaps: [],
+    updatedAt: ""
+  };
+}
+
+function defaultAnalysisSettings() {
+  return { maxConcurrency: 4 };
+}
+
 function defaultBlueprint() {
   return {
     titleOptions: [],
@@ -126,6 +142,14 @@ function createDefaultProject() {
     agents: "",
     creationMode: "平衡型",
     importStatus: "",
+    importSource: {
+      fileName: "",
+      format: "",
+      pageCount: 0,
+      pagesWithoutText: [],
+      pageMap: [],
+      warnings: []
+    },
     constitutionStatus: "draft",
     createdAt: now,
     updatedAt: now,
@@ -135,7 +159,9 @@ function createDefaultProject() {
     exportOptions: defaultExportOptions(),
     memory: defaultMemory(),
     storyState: defaultStoryState(),
-    documents: defaultDocuments()
+    documents: defaultDocuments(),
+    analysis: defaultAnalysis(),
+    analysisSettings: defaultAnalysisSettings()
   };
 }
 
@@ -447,6 +473,8 @@ function normalizeProject(input) {
   const sourceBlueprint = objectValue(input.blueprint);
   const sourceExportOptions = objectValue(input.exportOptions);
   const sourceMemory = objectValue(input.memory);
+  const sourceAnalysis = objectValue(input.analysis);
+  const sourceAnalysisSettings = objectValue(input.analysisSettings);
   const rawVersion = input.schemaVersion;
   const sourceVersion = Number.isFinite(Number(rawVersion)) ? Number(rawVersion) : null;
 
@@ -487,6 +515,24 @@ function normalizeProject(input) {
     agents: stringValue(input.agents),
     creationMode: stringValue(input.creationMode, "平衡型"),
     importStatus: stringValue(input.importStatus),
+    importSource: {
+      fileName: stringValue(input.importSource?.fileName),
+      format: stringValue(input.importSource?.format),
+      pageCount: numberValue(input.importSource?.pageCount, 0),
+      pagesWithoutText: Array.isArray(input.importSource?.pagesWithoutText)
+        ? input.importSource.pagesWithoutText.map((item) => numberValue(item)).filter((item) => item > 0)
+        : [],
+      pageMap: Array.isArray(input.importSource?.pageMap)
+        ? input.importSource.pageMap.map((item) => ({
+            pageNumber: numberValue(item?.pageNumber),
+            paragraphIndex: numberValue(item?.paragraphIndex),
+            chapterId: stringValue(item?.chapterId),
+            chapterParagraph: numberValue(item?.chapterParagraph),
+            text: stringValue(item?.text)
+          })).filter((item) => item.pageNumber > 0 && item.text)
+        : [],
+      warnings: stringList(input.importSource?.warnings)
+    },
     constitutionStatus: stringValue(input.constitutionStatus, "draft"),
     createdAt: timestamp(input.createdAt || defaults.createdAt),
     updatedAt: timestamp(input.updatedAt || defaults.updatedAt),
@@ -563,6 +609,21 @@ function normalizeProject(input) {
       )
     },
     storyState: normalizeStoryState(input.storyState),
+    analysis: {
+      status: stringValue(sourceAnalysis.status, defaults.analysis.status),
+      runId: stringValue(sourceAnalysis.runId),
+      generationId: stringValue(sourceAnalysis.generationId),
+      workflowId: stringValue(sourceAnalysis.workflowId),
+      blockingGaps: stringList(sourceAnalysis.blockingGaps),
+      nonBlockingGaps: stringList(sourceAnalysis.nonBlockingGaps),
+      updatedAt: stringValue(sourceAnalysis.updatedAt)
+    },
+    analysisSettings: {
+      maxConcurrency: Math.max(
+        1,
+        Math.min(8, Math.round(numberValue(sourceAnalysisSettings.maxConcurrency, 4)))
+      )
+    },
     documents: {
       characterArchive: stringValue(input.documents?.characterArchive),
       stagePlan: stringValue(input.documents?.stagePlan),

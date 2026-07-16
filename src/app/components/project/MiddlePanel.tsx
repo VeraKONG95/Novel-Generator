@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  CheckIcon,
-  FileTextIcon,
+  FileDiffIcon,
   PaperclipIcon,
   SendIcon,
   SparklesIcon,
@@ -16,9 +15,8 @@ interface MiddlePanelProps {
   activeDoc: ActiveDoc | null;
   isGenerating: boolean;
   onSendMessage: (text: string) => void;
-  onPinProposal: (messageId: string) => void | Promise<void>;
+  onOpenChanges: (messageId: string) => void;
   onContinueProposal: (messageId: string) => void | Promise<void>;
-  onRejectProposal: (messageId: string) => void | Promise<void>;
   onResolveConflict: (choice: 'keep' | 'accept' | 'cancel') => void | Promise<void>;
   onCreateRevisionFromReview: () => void | Promise<void>;
   onStopTask: () => void | Promise<void>;
@@ -29,7 +27,7 @@ interface MiddlePanelProps {
 
 function statusText(status?: string) {
   const labels: Record<string, string> = {
-    awaiting_confirmation: '等待确认', completed: '已完成', failed: '失败', stopped: '已停止',
+    awaiting_confirmation: '等待回复', completed: '已完成', failed: '失败', stopped: '已停止',
     interrupted: '意外中断', rejected: '已拒绝', abandoned: '已放弃', queued: '准备中',
     reading: '读取资料', planning: '正在规划', executing: '正在生成'
   };
@@ -49,11 +47,10 @@ function TypingIndicator() {
   );
 }
 
-function MessageBubble({ msg, onPinProposal, onContinueProposal, onRejectProposal }: {
+function MessageBubble({ msg, onOpenChanges, onContinueProposal }: {
   msg: Message;
-  onPinProposal: (messageId: string) => void | Promise<void>;
+  onOpenChanges: (messageId: string) => void;
   onContinueProposal: (messageId: string) => void | Promise<void>;
-  onRejectProposal: (messageId: string) => void | Promise<void>;
 }) {
   const isUser = msg.role === 'user';
   const changes = msg.proposal?.changes || [];
@@ -85,16 +82,17 @@ function MessageBubble({ msg, onPinProposal, onContinueProposal, onRejectProposa
             )}
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <button
-                onClick={() => void onPinProposal(msg.id)}
-                disabled={msg.proposal.status !== 'pending'}
+                onClick={() => onOpenChanges(msg.id)}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs"
-                style={{ background: msg.proposal.status === 'pinned' ? '#E8F7EE' : msg.proposal.status === 'rejected' ? '#F0F0F5' : '#1A1A2E', color: msg.proposal.status === 'pinned' ? '#1C7C47' : msg.proposal.status === 'rejected' ? '#8B8B9E' : '#FFFFFF' }}
+                style={{ background: '#1A1A2E', color: '#FFFFFF' }}
               >
-                <CheckIcon size={12} />
-                {msg.proposal.status === 'pinned' ? '已写入文件' : msg.proposal.status === 'rejected' ? '已拒绝' : '确认写入'}
+                <FileDiffIcon size={12} />
+                查看改动
               </button>
-              {msg.proposal.status === 'pending' && <button onClick={() => void onContinueProposal(msg.id)} className="px-3 py-1.5 rounded-lg text-xs" style={{ border: '1px solid #B8C7F5', color: '#2E5BD1' }}>继续修改</button>}
-              {msg.proposal.status === 'pending' && <button onClick={() => void onRejectProposal(msg.id)} className="px-3 py-1.5 rounded-lg text-xs" style={{ border: '1px solid #D8D8E8', color: '#6E6E8A' }}>拒绝</button>}
+              <button onClick={() => void onContinueProposal(msg.id)} className="px-3 py-1.5 rounded-lg text-xs" style={{ border: '1px solid #B8C7F5', color: '#2E5BD1' }}>继续修改</button>
+              <span className="text-xs" style={{ color: msg.proposal.status === 'pinned' ? '#6D8A78' : '#B26A18' }}>
+                {msg.proposal.status === 'pinned' ? '已自动写入' : msg.proposal.status === 'rejected' ? '未写入' : '自动写入暂停'}
+              </span>
             </div>
           </div>
         )}
@@ -104,8 +102,8 @@ function MessageBubble({ msg, onPinProposal, onContinueProposal, onRejectProposa
 }
 
 export function MiddlePanel(props: MiddlePanelProps) {
-  const { selectedConversation, activeDoc, isGenerating, onSendMessage, onPinProposal, onContinueProposal,
-    onRejectProposal, onResolveConflict, onCreateRevisionFromReview, onStopTask, onRetryTask, onAbandonTask, onCloseDoc } = props;
+  const { selectedConversation, activeDoc, isGenerating, onSendMessage, onOpenChanges, onContinueProposal,
+    onResolveConflict, onCreateRevisionFromReview, onStopTask, onRetryTask, onAbandonTask, onCloseDoc } = props;
   const [inputText, setInputText] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [selectedConversation?.messages, isGenerating]);
@@ -138,11 +136,11 @@ export function MiddlePanel(props: MiddlePanelProps) {
             </div>
           ) : (
             <div className="p-5" aria-live="polite" aria-busy={isGenerating}>
-              {selectedConversation.messages.map((msg) => <MessageBubble key={msg.id} msg={msg} onPinProposal={onPinProposal} onContinueProposal={onContinueProposal} onRejectProposal={onRejectProposal} />)}
+              {selectedConversation.messages.map((msg) => <MessageBubble key={msg.id} msg={msg} onOpenChanges={onOpenChanges} onContinueProposal={onContinueProposal} />)}
               {selectedConversation.status === 'awaiting_confirmation' && selectedConversation.resultKind === 'conflict' && (
                 <div className="ml-10 mt-2 flex flex-wrap gap-2">
-                  <button onClick={() => void onResolveConflict('keep')} className="px-3 py-1.5 rounded-lg text-xs" style={{ background: '#1A1A2E', color: '#FFFFFF' }}>保持原方向</button>
-                  <button onClick={() => void onResolveConflict('accept')} className="px-3 py-1.5 rounded-lg text-xs" style={{ border: '1px solid #B8C7F5', color: '#2E5BD1' }}>接受新方向</button>
+                  <button onClick={() => void onResolveConflict('keep')} className="px-3 py-1.5 rounded-lg text-xs" style={{ background: '#1A1A2E', color: '#FFFFFF' }}>保持现状</button>
+                  <button onClick={() => void onResolveConflict('accept')} className="px-3 py-1.5 rounded-lg text-xs" style={{ border: '1px solid #B8C7F5', color: '#2E5BD1' }}>按建议重试</button>
                   <button onClick={() => void onResolveConflict('cancel')} className="px-3 py-1.5 rounded-lg text-xs" style={{ border: '1px solid #D8D8E8', color: '#6E6E8A' }}>取消</button>
                 </div>
               )}
@@ -154,15 +152,6 @@ export function MiddlePanel(props: MiddlePanelProps) {
           )}
         </div>
 
-        {activeDoc && (
-          <aside className="w-[42%] min-w-[300px] max-w-[520px] flex flex-col" style={{ borderLeft: '1px solid #EAEAEA', background: '#FCFCFD' }}>
-            <div className="flex items-center justify-between px-4 py-3" style={{ borderBottom: '1px solid #EAEAEA' }}>
-              <div className="min-w-0"><p className="text-xs truncate" style={{ color: '#3A3A5A' }}>{activeDoc.path || activeDoc.title}</p><p className="text-xs mt-0.5" style={{ color: '#9999B3' }}>只读预览</p></div>
-              <button onClick={onCloseDoc} aria-label="关闭文件预览" className="p-1.5 rounded-lg" style={{ color: '#8B8B9E' }}><XIcon size={14} /></button>
-            </div>
-            <pre className="flex-1 overflow-auto p-5 text-sm whitespace-pre-wrap" style={{ color: '#2A2A3E', lineHeight: 1.8, fontFamily: activeDoc.path?.endsWith('.json') || activeDoc.path?.endsWith('.jsonl') ? 'ui-monospace, SFMono-Regular, Menlo, monospace' : "'Noto Serif SC', 'STSong', serif" }}>{activeDoc.content || '文件为空'}</pre>
-          </aside>
-        )}
       </div>
 
       <div className="flex-shrink-0 p-4" style={{ borderTop: '1px solid #EAEAEA' }}>
@@ -172,7 +161,7 @@ export function MiddlePanel(props: MiddlePanelProps) {
           <textarea aria-label="创作要求" disabled={isGenerating} value={inputText} onChange={(event) => setInputText(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send(); } }} placeholder={activeDoc ? `针对「${activeDoc.path || activeDoc.title}」提出要求…` : '输入创作要求或问题（Enter 发送，Shift+Enter 换行）'} rows={2} className="flex-1 outline-none resize-none text-sm" style={{ background: 'transparent', color: '#2A2A3E', lineHeight: 1.6, maxHeight: '120px' }} />
           <button onClick={send} disabled={!inputText.trim() || isGenerating} aria-label="发送" className="flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: inputText.trim() && !isGenerating ? '#1A1A2E' : '#E0E0EA', cursor: inputText.trim() && !isGenerating ? 'pointer' : 'not-allowed' }}><SendIcon size={14} color={inputText.trim() && !isGenerating ? '#FFFFFF' : '#9999B3'} /></button>
         </div>
-        <p className="text-xs mt-2" style={{ color: '#C0C0CC' }}>创作成果确认后才会写入项目文件</p>
+        <p className="text-xs mt-2" style={{ color: '#C0C0CC' }}>创作成果完成后会自动写入，并保留本次修改记录</p>
       </div>
     </div>
   );

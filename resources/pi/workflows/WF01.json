@@ -1,0 +1,24 @@
+{
+  "id": "WF01",
+  "version": "1.3.0",
+  "trigger": "import_novel",
+  "maxRetries": 2,
+  "writesGraph": true,
+  "nodes": [
+    { "id": "navigate", "role": "R02", "required": true },
+    { "id": "extract", "role": "R03", "dependsOn": ["navigate"], "expand": "chapters", "parallel": true, "required": true },
+    { "id": "unify", "role": "R04", "dependsOn": ["extract"], "required": true },
+    { "id": "timeline", "role": "R05", "dependsOn": ["unify"], "required": true },
+    { "id": "character_states", "role": "R06", "dependsOn": ["timeline"], "expand": "majorCharacters", "parallel": true, "required": true },
+    { "id": "relations", "role": "R07", "dependsOn": ["timeline"], "expand": "importantPairs", "parallel": true, "required": true },
+    { "id": "storylines", "role": "R08", "dependsOn": ["timeline"], "expand": "storylines", "parallel": true, "required": true },
+    { "id": "hooks", "role": "R09", "dependsOn": ["timeline"], "expand": "hooks", "parallel": true, "required": false },
+    { "id": "style", "role": "R10", "dependsOn": ["timeline"], "parallel": true, "required": true },
+    { "id": "knowledge", "role": "R11", "dependsOn": ["timeline"], "expand": "majorCharacters", "parallel": true, "required": true },
+    { "id": "check", "role": "R12", "dependsOn": ["character_states", "relations", "storylines", "hooks", "style", "knowledge"], "parallel": true, "required": true },
+    { "id": "merge", "type": "program", "dependsOn": ["check"], "required": true },
+    { "id": "materials", "role": "R13", "dependsOn": ["merge"], "parallel": true, "required": true },
+    { "id": "publish", "type": "program", "dependsOn": ["materials"], "required": true }
+  ],
+  "writableFiles": ["knowledge/CURRENT.json", "knowledge/generations/**"]
+}

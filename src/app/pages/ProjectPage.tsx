@@ -5,14 +5,18 @@ import {
   BookOpenIcon,
   DownloadIcon,
   Settings2Icon,
-  CheckCircle2Icon
+  CheckCircle2Icon,
+  NetworkIcon
 } from 'lucide-react';
 import { LeftPanel } from '../components/project/LeftPanel';
 import { MiddlePanel } from '../components/project/MiddlePanel';
 import { RightPanel } from '../components/project/RightPanel';
+import { DocumentWorkspace } from '../components/project/DocumentWorkspace';
 import { ExportModal } from '../components/modals/ExportModal';
 import { SettingsModal } from '../components/modals/SettingsModal';
 import { WorkspaceConflictModal } from '../components/modals/WorkspaceConflictModal';
+import { AnalysisStatusBar, AnalysisStatusRun } from '../components/analysis/AnalysisStatusBar';
+import { AnalysisEvidenceRef, AnalysisGraph, shouldLockCreation } from '../lib/analysis';
 import { useProjectContext } from '../context/ProjectContext';
 import {
   buildExportContent,
@@ -23,7 +27,7 @@ import {
   updateChapterContent,
   updateOutline
 } from '../lib/projectBridge';
-import { ActiveDoc, Conversation, FileChange, Message, NovalProject, PiTask, PiTaskResult, WorkspaceFile } from '../types';
+import { ActiveDoc, AnalysisRunStatus, Conversation, FileChange, Message, NovalProject, PiTask, PiTaskResult, WorkspaceConflict, WorkspaceFile } from '../types';
 
 const RUNNING_TASK_STATUSES = new Set(['queued', 'reading', 'planning', 'executing']);
 
@@ -53,7 +57,14 @@ const TASK_TYPE_LABELS: Record<string, string> = {
 function taskResultText(task: PiTask) {
   const result = task.result;
   if (!result) return task.assistantText || task.error || '任务正在准备中。';
-  if (result.kind === 'answer') return String(result.answer || '');
+  if (result.kind === 'answer') {
+    const sources = Array.isArray(result.sources) ? result.sources : [];
+    const sourceText = sources.map((source, index) => {
+      if (typeof source === 'string') return `${index + 1}. ${source}`;
+      return `${index + 1}. ${String(source.sourcePath || source.chapterId || source.materialId || '项目材料')}${source.excerpt ? `：${String(source.excerpt)}` : ''}`;
+    }).join('\n');
+    return `${String(result.answer || '')}${sourceText ? `\n\n依据：\n${sourceText}` : ''}`;
+  }
   if (result.kind === 'review') {
     const issues = Array.isArray(result.issues) ? result.issues : [];
     return [
@@ -75,7 +86,8 @@ function taskResultText(task: PiTask) {
     ].join('\n\n');
   }
   if (result.kind === 'conflict') {
-    return `${String(result.title || '发现创作冲突')}\n\n${String(result.conflict || '')}\n\n请先选择保留原方向、接受新方向，或取消本次要求。`;
+    const options = Array.isArray(result.options) ? result.options.map((item, index) => `${index + 1}. ${String(item)}`).join('\n') : '';
+    return `${String(result.title || '发现创作冲突')}\n\n${String(result.conflict || '')}${options ? `\n\n可选处理：\n${options}` : ''}\n\n你可以保持现状，或按建议重新执行。`;
   }
   if (result.kind === 'candidate') {
     const changes = Array.isArray(result.changes) ? result.changes : [];
@@ -101,6 +113,7 @@ function taskConversation(task: PiTask): Conversation {
         path: String(item.path || ''),
         action: item.action === 'delete' ? 'delete' : item.action === 'create' ? 'create' : 'update',
         content: item.content == null ? undefined : String(item.content),
+        beforeContent: item.beforeContent == null ? undefined : String(item.beforeContent),
         reason: item.reason == null ? undefined : String(item.reason)
       }))
     : [];
@@ -340,14 +353,22 @@ export function ProjectPage() {
     proposal: NonNullable<Message['proposal']>;
   } | null>(null);
   const handledMemoryTasks = useRef(new Set<string>());
+  const handledCandidateTasks = useRef(new Set<string>());
   const autoStartedProject = useRef('');
   const [selectedConvId, setSelectedConvId] = useState<string | null>(null);
-  const [activeDoc, setActiveDoc] = useState<ActiveDoc | null>(null);
+  const [openDocs, setOpenDocs] = useState<ActiveDoc[]>([]);
+  const [activeTabId, setActiveTabId] = useState('');
+  const [diffTaskId, setDiffTaskId] = useState('');
   const [workspaceFiles, setWorkspaceFiles] = useState<WorkspaceFile[]>([]);
   const [rightCollapsed, setRightCollapsed] = useState(() => localStorage.getItem('noval.files.collapsed') === 'true');
   const [isGenerating, setIsGenerating] = useState(false);
+  const isGeneratingRef = useRef(false);
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  const [analysisRun, setAnalysisRun] = useState<AnalysisRunStatus | null>(null);
+  const [analysisGraph, setAnalysisGraph] = useState<AnalysisGraph | null>(null);
+  const analysisAutoStarted = useRef('');
+  const refreshedGeneration = useRef('');
   const [notification, setNotification] = useState<{
     msg: string;
     type: 'success' | 'info' | 'error';
@@ -357,18 +378,54 @@ export function ProjectPage() {
     setNotification({ msg, type });
     window.setTimeout(() => setNotification(null), 2500);
   };
+  const updateGenerating = (value: boolean) => {
+    isGeneratingRef.current = value;
+    setIsGenerating(value);
+  };
 
   const projectInfo = currentProject ? projectToCard(currentProject, currentPath) : null;
   const outline = currentProject ? buildOutlineContent(currentProject) : '';
   const chapters = currentProject ? projectToChapters(currentProject) : [];
 
   const selectedConversation = conversations.find((item) => item.id === selectedConvId) || null;
+  const diffTask = tasks.find((task) => task.id === diffTaskId && task.result?.kind === 'candidate') || null;
+  const activeDoc = activeTabId.startsWith('file:')
+    ? openDocs.find((document) => `file:${document.id}` === activeTabId) || null
+    : null;
   const totalWords = chapters.reduce((sum, chapter) => sum + chapter.wordCount, 0);
   const currentChapter = currentProject
     ? currentProject.chapters.find((chapter) => chapter.id === currentChapterId) ||
       currentProject.chapters[currentProject.chapters.length - 1] ||
       null
     : null;
+  const projectAnalysisStatus = currentProject?.analysis?.status ||
+    (currentProject?.importStatus === 'raw_imported' ? 'raw_imported' : 'uninitialized');
+  const analysisLocked = shouldLockCreation({
+    status: analysisRun?.status || projectAnalysisStatus,
+    blockingGaps: analysisRun?.blockingGaps || currentProject?.analysis?.blockingGaps || []
+  });
+  const analysisBarRun: AnalysisStatusRun | null = analysisRun
+    ? {
+        ...analysisRun,
+        totalJobs: analysisRun.counts.total,
+        completedJobs: analysisRun.counts.completed,
+        runningJobs: analysisRun.counts.running,
+        failedJobs: analysisRun.counts.failed,
+        waitingJobs: analysisRun.counts.waiting
+      }
+    : currentProject
+      ? {
+          status: projectAnalysisStatus,
+          runId: currentProject.analysis?.runId,
+          workflowId: currentProject.analysis?.workflowId || 'WF01',
+          generationId: currentProject.analysis?.generationId,
+          blockingGaps: currentProject.analysis?.blockingGaps || [],
+          nonBlockingGaps: currentProject.analysis?.nonBlockingGaps || [],
+          maxConcurrency: currentProject.analysisSettings?.maxConcurrency || 4,
+          totalJobs: 0,
+          completedJobs: projectAnalysisStatus === 'ready' ? 1 : 0
+        }
+      : null;
 
   const refreshFileTree = async () => {
     if (!currentPath || !window.novalAPI?.listWorkspaceFiles) return;
@@ -377,6 +434,78 @@ export function ProjectPage() {
   };
 
   useEffect(() => { void refreshFileTree(); }, [currentPath, currentProject?.updatedAt, externalChangePaths.join('|')]);
+
+  const refreshGraph = async () => {
+    if (!currentPath || !window.novalAPI?.getGraph) return;
+    const result = await window.novalAPI.getGraph(currentPath);
+    if (result?.ok) setAnalysisGraph((result.data || null) as AnalysisGraph | null);
+  };
+
+  useEffect(() => {
+    if (!currentProject || currentSource !== 'workspace' || !currentPath) {
+      setAnalysisRun(null);
+      setAnalysisGraph(null);
+      return;
+    }
+    let cancelled = false;
+    void Promise.all([
+      window.novalAPI.getAnalysisStatus(currentPath),
+      window.novalAPI.getGraph(currentPath)
+    ]).then(async ([statusResult, graphResult]) => {
+      if (cancelled) return;
+      const status = statusResult?.data as AnalysisRunStatus | null;
+      if (status) setAnalysisRun(status);
+      if (graphResult?.ok) setAnalysisGraph((graphResult.data || null) as AnalysisGraph | null);
+      if (
+        status?.recovered &&
+        status.runId &&
+        settings.capabilityStatus === 'ready' &&
+        analysisAutoStarted.current !== `recover:${status.runId}`
+      ) {
+        analysisAutoStarted.current = `recover:${status.runId}`;
+        const resumed = await window.novalAPI.resumeAnalysis(currentPath, status.runId);
+        if (!cancelled && resumed?.ok && resumed.data) setAnalysisRun(resumed.data);
+        if (!cancelled && !resumed?.ok) showNotification(`恢复分析失败：${resumed?.error || '未知错误'}`, 'error');
+        return;
+      }
+      const rawImported = !status && (currentProject.analysis?.status === 'raw_imported' || currentProject.importStatus === 'raw_imported');
+      if (
+        rawImported &&
+        settings.capabilityStatus === 'ready' &&
+        analysisAutoStarted.current !== currentProject.id
+      ) {
+        analysisAutoStarted.current = currentProject.id;
+        const started = await window.novalAPI.startAnalysis({
+          root: currentPath,
+          workflowId: 'WF01',
+          maxConcurrency: currentProject.analysisSettings?.maxConcurrency || 4
+        });
+        if (!cancelled && started?.ok && started.data) setAnalysisRun(started.data);
+        if (!cancelled && !started?.ok) showNotification(`分析启动失败：${started?.error || '未知错误'}`, 'error');
+      }
+    });
+    return () => { cancelled = true; };
+  }, [currentProject?.id, currentPath, currentSource, settings.capabilityStatus]);
+
+  useEffect(() => {
+    if (!window.novalAPI?.onAnalysisEvent) return;
+    return window.novalAPI.onAnalysisEvent((payload) => {
+      if (!payload || payload.projectId !== currentProject?.id) return;
+      const next = payload as AnalysisRunStatus;
+      setAnalysisRun(next);
+      if (
+        ['ready', 'degraded'].includes(next.status) &&
+        next.generationId &&
+        refreshedGeneration.current !== next.generationId
+      ) {
+        refreshedGeneration.current = next.generationId;
+        void Promise.all([reloadWorkspace(), refreshGraph(), refreshFileTree()]).then(() => {
+          showNotification(next.status === 'ready' ? '小说分析完成，关系图谱已经可用' : '主要分析已完成，仍有少量内容可补跑');
+        });
+      }
+      if (next.status === 'failed') showNotification(`分析未完成：${next.error || '请补跑失败项'}`, 'error');
+    });
+  }, [currentProject?.id, currentPath]);
 
   useEffect(() => {
     if (!currentProject || !window.novalAPI?.listTasks) return;
@@ -389,8 +518,13 @@ export function ProjectPage() {
       setTasksLoaded(true);
       const open = loadedTasks.find((task: PiTask) => RUNNING_TASK_STATUSES.has(task.status));
       setActiveTaskId(open?.id || '');
-      setIsGenerating(Boolean(open && RUNNING_TASK_STATUSES.has(open.status)));
+      updateGenerating(Boolean(open && RUNNING_TASK_STATUSES.has(open.status)));
       if (!selectedConvId && loadedTasks[0]) setSelectedConvId(loadedTasks[0].conversationId || `conversation-${loadedTasks[0].id}`);
+      const latestChange = loadedTasks.find((task: PiTask) => task.status === 'completed' && task.result?.kind === 'candidate');
+      if (latestChange) {
+        setDiffTaskId(latestChange.id);
+        setActiveTabId((current) => current || `diff:${latestChange.id}`);
+      }
     });
     return () => {
       cancelled = true;
@@ -404,14 +538,59 @@ export function ProjectPage() {
       if (!task || task.projectId !== currentProject?.id) return;
       setTasks((current) => [task, ...current.filter((item) => item.id !== task.id)]);
       const running = RUNNING_TASK_STATUSES.has(task.status);
-      setIsGenerating(running);
+      updateGenerating(running);
       setActiveTaskId(running ? task.id : '');
       if (task.taskType === 'refresh_memory' && ['failed', 'stopped', 'interrupted'].includes(task.status)) {
         showNotification('故事记忆待重试，正式正文不受影响', 'error');
       }
       if (
+        task.status === 'awaiting_confirmation' &&
+        task.result?.kind === 'candidate' &&
+        task.result.autoApplyBlocked &&
+        Array.isArray(task.result.conflicts) &&
+        currentProject
+      ) {
+        const changes = Array.isArray(task.result.changes) ? task.result.changes.map((item) => ({
+          path: String(item.path || ''),
+          action: item.action === 'create' ? 'create' as const : item.action === 'delete' ? 'delete' as const : 'update' as const,
+          content: item.content == null ? '' : String(item.content),
+          beforeContent: item.beforeContent == null ? '' : String(item.beforeContent),
+          reason: item.reason == null ? '' : String(item.reason)
+        })) : [];
+        registerWorkspaceConflicts(task.result.conflicts as WorkspaceConflict[]);
+        setPendingConflictCommit({
+          taskId: task.id,
+          project: currentProject,
+          proposal: {
+            docId: String(task.target?.docId || 'candidate'),
+            docType: 'chapter',
+            docTitle: String(task.result.title || '本次修改'),
+            content: '',
+            taskId: task.id,
+            summary: String(task.result.summary || ''),
+            changes
+          }
+        });
+        setDiffTaskId(task.id);
+        setActiveTabId(`diff:${task.id}`);
+        showNotification('文件已在其他地方改变，自动写入已暂停', 'error');
+      }
+      if (
         task.status === 'completed' &&
-        task.result?.kind === 'memory' &&
+        task.result?.kind === 'candidate' &&
+        !handledCandidateTasks.current.has(task.id)
+      ) {
+        handledCandidateTasks.current.add(task.id);
+        setDiffTaskId(task.id);
+        setActiveTabId(`diff:${task.id}`);
+        void reloadWorkspace().then(async () => {
+          await refreshFileTree();
+          showNotification('修改已自动写入，可在“本次修改”中查看');
+        });
+      }
+      if (
+        task.status === 'completed' &&
+        (task.result?.kind === 'memory' || task.result?.kind === 'memory_confirmation') &&
         currentProject &&
         !handledMemoryTasks.current.has(task.id)
       ) {
@@ -426,7 +605,7 @@ export function ProjectPage() {
           }).then(async (saveResult) => {
             if (!saveResult?.ok) {
               if (Array.isArray(saveResult?.conflicts)) registerWorkspaceConflicts(saveResult.conflicts);
-              showNotification('正文已确认，但记忆因外部修改暂未写入', 'error');
+              showNotification('正文已写入，但记忆因外部修改暂未更新', 'error');
               return;
             }
             updateCurrentProject(saveResult.data || nextProject);
@@ -440,6 +619,24 @@ export function ProjectPage() {
       }
     });
   }, [currentProject, currentPath, currentSource, workspaceRevisions]);
+
+  useEffect(() => {
+    if (!tasksLoaded || !currentProject || tasks.length > 0 || autoStartedProject.current === currentProject.id) return;
+    autoStartedProject.current = currentProject.id;
+    if (settings.capabilityStatus !== 'ready') {
+      handleNewConversation();
+      return;
+    }
+    if (['raw_imported', 'analyzing', 'paused'].includes(currentProject.analysis?.status || currentProject.importStatus)) {
+      handleNewConversation();
+      return;
+    }
+    if (currentProject.constitutionStatus !== 'confirmed') {
+      void startPiTask('create_project', '请检查现有信息，只补问真正影响创作的问题，然后提交 AGENTS.md 候选改动。');
+      return;
+    }
+    handleNewConversation();
+  }, [tasksLoaded, currentProject?.id, tasks.length, settings.capabilityStatus]);
 
   if (!isReady) {
     return (
@@ -510,8 +707,73 @@ export function ProjectPage() {
   };
 
   const handleNewConversation = () => {
+    if (analysisLocked) {
+      showNotification('小说分析完成前只能查看文件和图谱', 'info');
+      return;
+    }
     setSelectedConvId(`conversation-${Date.now()}`);
-    setActiveDoc(null);
+  };
+
+  const handleStartAnalysis = async () => {
+    if (!currentPath) return;
+    if (settings.capabilityStatus !== 'ready') {
+      showNotification('请先在模型设置中完成能力检查', 'error');
+      setIsSettingsModalOpen(true);
+      return;
+    }
+    const result = await window.novalAPI.startAnalysis({
+      root: currentPath,
+      workflowId: 'WF01',
+      maxConcurrency: currentProject?.analysisSettings?.maxConcurrency || 4
+    });
+    if (!result?.ok || !result.data) {
+      showNotification(`分析启动失败：${result?.error || '未知错误'}`, 'error');
+      return;
+    }
+    setAnalysisRun(result.data);
+  };
+
+  const handlePauseAnalysis = async () => {
+    if (!analysisRun?.runId) return;
+    const result = await window.novalAPI.pauseAnalysis(analysisRun.runId);
+    if (result?.ok && result.data) setAnalysisRun(result.data);
+    else showNotification(`暂停失败：${result?.error || '未知错误'}`, 'error');
+  };
+
+  const handleResumeAnalysis = async () => {
+    if (!currentPath || !analysisBarRun?.runId) return;
+    const result = await window.novalAPI.resumeAnalysis(currentPath, analysisBarRun.runId);
+    if (result?.ok && result.data) setAnalysisRun(result.data);
+    else showNotification(`继续失败：${result?.error || '未知错误'}`, 'error');
+  };
+
+  const handleCancelAnalysis = async () => {
+    if (!analysisRun?.runId) return;
+    const result = await window.novalAPI.cancelAnalysis(analysisRun.runId);
+    if (result?.ok && result.data) setAnalysisRun(result.data);
+    else showNotification(`取消失败：${result?.error || '未知错误'}`, 'error');
+  };
+
+  const handleRetryAnalysis = async () => {
+    if (!currentPath) return;
+    const result = await window.novalAPI.retryAnalysis(currentPath, analysisBarRun?.workflowId || 'WF01');
+    if (result?.ok && result.data) setAnalysisRun(result.data);
+    else showNotification(`补跑失败：${result?.error || '未知错误'}`, 'error');
+  };
+
+  const handleAnalysisConcurrency = async (value: number) => {
+    if (!analysisRun?.runId) return;
+    const result = await window.novalAPI.setAnalysisConcurrency(analysisRun.runId, value);
+    if (result?.ok && result.data) {
+      setAnalysisRun(result.data);
+      updateCurrentProject((project) => ({ ...project, analysisSettings: { maxConcurrency: value } }));
+    }
+    else showNotification(`并发设置失败：${result?.error || '未知错误'}`, 'error');
+  };
+
+  const openDocument = (document: ActiveDoc) => {
+    setOpenDocs((current) => [...current.filter((item) => item.id !== document.id), document]);
+    setActiveTabId(`file:${document.id}`);
   };
 
   const handleOpenFile = async (file: WorkspaceFile) => {
@@ -521,11 +783,56 @@ export function ProjectPage() {
       showNotification(`文件打开失败：${result?.error || '未知错误'}`, 'error');
       return;
     }
-    setActiveDoc({ id: file.path, type: 'file', title: file.name, path: file.path, content: String(result.data?.content || '') });
+    openDocument({ id: file.path, type: 'file', title: file.name, path: file.path, content: String(result.data?.content || '') });
   };
 
-  const handleCloseDoc = () => {
-    setActiveDoc(null);
+  const handleOpenEvidence = async (reference: AnalysisEvidenceRef) => {
+    if (!currentPath) return;
+    const resolved = await window.novalAPI.resolveGraphEvidence(currentPath, reference.refId || reference);
+    if (!resolved?.ok || !resolved.data) {
+      showNotification(`证据定位失败：${resolved?.error || '未知错误'}`, 'error');
+      return;
+    }
+    const evidence = resolved.data as {
+      status?: string;
+      sourcePath?: string;
+      paragraphStart?: number;
+      paragraphEnd?: number;
+      content?: string;
+      ref?: AnalysisEvidenceRef;
+    };
+    const rawPath = String(evidence.sourcePath || reference.sourcePath || '');
+    const visiblePath = rawPath.startsWith('memory/graph/') ? `knowledge/current/${rawPath}` : rawPath;
+    const opened = await window.novalAPI.readWorkspaceFile(currentPath, visiblePath);
+    if (!opened?.ok) {
+      showNotification(`原文打开失败：${opened?.error || '未知错误'}`, 'error');
+      return;
+    }
+    openDocument({
+      id: visiblePath,
+      type: 'file',
+      title: visiblePath.split('/').pop() || '原文证据',
+      path: visiblePath,
+      content: String(opened.data?.content || ''),
+      evidence: {
+        status: String(evidence.status || 'current'),
+        paragraphStart: evidence.paragraphStart,
+        paragraphEnd: evidence.paragraphEnd,
+        excerpt: String(evidence.content || evidence.ref?.excerpt || reference.excerpt || '')
+      }
+    });
+    showNotification(evidence.status === 'stale' ? '原文已改动，已打开相关章节供核对' : '已打开对应原文位置', evidence.status === 'stale' ? 'info' : 'success');
+  };
+
+  const handleCloseDoc = (documentId = activeDoc?.id || '') => {
+    if (!documentId) return;
+    setOpenDocs((current) => {
+      const next = current.filter((document) => document.id !== documentId);
+      if (activeTabId === `file:${documentId}`) {
+        setActiveTabId(diffTask ? `diff:${diffTask.id}` : next[0] ? `file:${next[0].id}` : '');
+      }
+      return next;
+    });
   };
 
   const startPiTask = async (
@@ -535,7 +842,11 @@ export function ProjectPage() {
     projectOverride?: NovalProject
   ) => {
     const taskProject = projectOverride || currentProject;
-    if (!taskProject || isGenerating) return null;
+    if (!taskProject || isGeneratingRef.current) return null;
+    if (analysisLocked) {
+      showNotification('小说分析完成前只能查看文件和图谱', 'info');
+      return null;
+    }
     if (currentSource !== 'workspace' || !currentPath) {
       showNotification('请先把项目迁移或保存为文件夹创作空间，再开始 AI 创作', 'error');
       return null;
@@ -547,7 +858,7 @@ export function ProjectPage() {
     }
     const conversationId = selectedConvId || `conversation-${Date.now()}`;
     const conversationTitle = selectedConversation?.title || instruction.trim().slice(0, 24) || '新对话';
-    setIsGenerating(true);
+    updateGenerating(true);
     try {
       const result = await window.novalAPI.startTask({
         project: taskProject,
@@ -562,7 +873,7 @@ export function ProjectPage() {
       });
       if (!result?.ok || !result.task) {
         showNotification(`任务启动失败：${result?.error || '未知错误'}`, 'error');
-        setIsGenerating(false);
+        updateGenerating(false);
         return null;
       }
       const task = result.task as PiTask;
@@ -572,28 +883,10 @@ export function ProjectPage() {
       return task;
     } catch (error) {
       showNotification(`任务启动失败：${error instanceof Error ? error.message : '未知错误'}`, 'error');
-      setIsGenerating(false);
+      updateGenerating(false);
       return null;
     }
   };
-
-  useEffect(() => {
-    if (!tasksLoaded || !currentProject || tasks.length > 0 || autoStartedProject.current === currentProject.id) return;
-    autoStartedProject.current = currentProject.id;
-    if (settings.capabilityStatus !== 'ready') {
-      handleNewConversation();
-      return;
-    }
-    if (currentProject.importStatus === 'needs_archive_confirmation') {
-      void startPiTask('import_novel', '请读取已导入的正式正文，先在对话中补问必要信息，再提交人物、时间线、伏笔和文风等项目文件的候选改动。');
-      return;
-    }
-    if (currentProject.constitutionStatus !== 'confirmed') {
-      void startPiTask('create_project', '请检查现有信息，只补问真正影响创作的问题，然后提交 AGENTS.md 候选改动。');
-      return;
-    }
-    handleNewConversation();
-  }, [tasksLoaded, currentProject?.id, tasks.length, settings.capabilityStatus]);
 
   const handleStopTask = async () => {
     if (!activeTaskId) return;
@@ -602,7 +895,7 @@ export function ProjectPage() {
       showNotification(`停止失败：${result?.error || '未知错误'}`, 'error');
       return;
     }
-    setIsGenerating(false);
+    updateGenerating(false);
     setActiveTaskId('');
     showNotification('任务已停止，正式内容没有被修改', 'info');
   };
@@ -626,11 +919,33 @@ export function ProjectPage() {
   };
 
   const handleSendMessage = async (text: string) => {
-    if (isGenerating) return;
+    if (isGeneratingRef.current) return;
+    if (analysisLocked) {
+      showNotification('小说分析完成前只能查看文件和图谱', 'info');
+      return;
+    }
+    if (
+      currentPath &&
+      analysisGraph &&
+      /(?:设定不对|关系不对|认知不对|时间不对|其实.+(?:是|知道|没有|不是)|请修正|纠正设定|撤销修正)/.test(text)
+    ) {
+      const result = await window.novalAPI.startAnalysis({
+        root: currentPath,
+        workflowId: 'WF03',
+        input: { correction: text }
+      });
+      if (result?.ok && result.data) {
+        setAnalysisRun(result.data);
+        showNotification('作者修正已记录，正在更新受影响的材料');
+      } else {
+        showNotification(`修正失败：${result?.error || '未知错误'}`, 'error');
+      }
+      return;
+    }
 
     const selectedTask = tasks.find((item) => item.id === selectedConversation?.taskId);
     if (selectedTask?.status === 'awaiting_confirmation' && selectedTask.result?.kind === 'question') {
-      setIsGenerating(true);
+      updateGenerating(true);
       const result = await window.novalAPI.answerTask({
         taskId: selectedTask.id,
         answer: text,
@@ -640,7 +955,7 @@ export function ProjectPage() {
         conversationHistory: selectedConversation?.messages.map((message) => ({ role: message.role, content: message.content })) || []
       });
       if (!result?.ok) {
-        setIsGenerating(false);
+        updateGenerating(false);
         showNotification(`提交回答失败：${result?.error || '未知错误'}`, 'error');
       }
       return;
@@ -653,56 +968,16 @@ export function ProjectPage() {
       docTitle: activeDoc.title,
       draftContent: activeDoc.content
     } : null;
-    if (
-      currentProject.importStatus === 'needs_archive_confirmation' &&
-      /续写|下一章|写.*章|生成.*章/.test(text)
-    ) {
-      showNotification('导入作品需要先完成读稿建档并确认', 'info');
-      await startPiTask('import_novel', '请先为导入作品完成读稿建档。', null);
-      return;
-    }
-
-    await startPiTask(fileTarget ? 'rewrite' : undefined, text, fileTarget);
+    await startPiTask(undefined, text, fileTarget);
   };
 
-  const handlePinProposal = async (messageId: string) => {
-    if (!selectedConversation || !currentProject) return;
-    const proposalMessage = selectedConversation.messages.find((message) => message.id === messageId);
-    const proposal = proposalMessage?.proposal;
-    if (!proposal || proposal.status === 'pinned') return;
-    const confirmResult = proposal.taskId
-      ? await window.novalAPI.confirmTask({
-          taskId: proposal.taskId,
-          project: currentProject,
-          workspaceRoot: currentSource === 'workspace' ? currentPath : '',
-          expectedRevisions: workspaceRevisions
-        })
-      : { ok: false, error: '候选结果缺少确认记录。' };
-    if (!confirmResult?.ok) {
-      if (Array.isArray(confirmResult?.conflicts)) {
-        registerWorkspaceConflicts(confirmResult.conflicts);
-        if (proposal.taskId) setPendingConflictCommit({ taskId: proposal.taskId, project: currentProject, proposal });
-      }
-      showNotification(confirmResult?.error || '检测到外部修改，确认已暂停', 'error');
-      return;
-    }
-    if (confirmResult.task) setTasks((current) => [confirmResult.task, ...current.filter((item) => item.id !== confirmResult.task.id)]);
-    if (confirmResult.data) updateCurrentProject(confirmResult.data);
-    await reloadWorkspace();
-    await refreshFileTree();
-    if (activeDoc?.path && proposal.changes?.some((change) => change.path === activeDoc.path && change.action !== 'delete')) {
-      const refreshed = await window.novalAPI.readWorkspaceFile(currentPath, activeDoc.path);
-      if (refreshed?.ok) setActiveDoc({ ...activeDoc, content: String(refreshed.data?.content || '') });
-    }
-    showNotification('已确认并写入项目文件');
-    const confirmedChapter = proposal.changes?.find((change) => /^chapters\/.+\.md$/.test(change.path) && change.action !== 'delete');
-    if (confirmedChapter) {
-      window.setTimeout(() => {
-        void startPiTask('refresh_memory', '请整理刚刚确认章节带来的故事记忆变化。', {
-          docType: 'file', filePath: confirmedChapter.path, docId: confirmedChapter.path, docTitle: confirmedChapter.path
-        }, confirmResult.data || currentProject);
-      }, 200);
-    }
+  const handleOpenChanges = (messageId: string) => {
+    if (!selectedConversation) return;
+    const message = selectedConversation.messages.find((item) => item.id === messageId);
+    const taskId = message?.proposal?.taskId;
+    if (!taskId) return;
+    setDiffTaskId(taskId);
+    setActiveTabId(`diff:${taskId}`);
   };
 
   const handleContinueProposal = async (messageId: string) => {
@@ -712,7 +987,7 @@ export function ProjectPage() {
     if (!taskId) return;
     const firstChange = message?.proposal?.changes?.find((change) => change.action !== 'delete');
     if (firstChange) {
-      setActiveDoc({
+      openDocument({
         id: firstChange.path,
         type: 'file',
         title: firstChange.path.split('/').pop() || firstChange.path,
@@ -720,29 +995,7 @@ export function ProjectPage() {
         content: firstChange.content || ''
       });
     }
-    const result = await window.novalAPI.rejectTask(taskId);
-    if (!result?.ok) {
-      showNotification(`暂时不能继续修改：${result?.error || '未知错误'}`, 'error');
-      return;
-    }
-    if (result.task) setTasks((current) => [result.task, ...current.filter((item) => item.id !== taskId)]);
-    setActiveTaskId('');
     showNotification('请在输入框说明下一版要怎么改', 'info');
-  };
-
-  const handleRejectProposal = async (messageId: string) => {
-    if (!selectedConversation) return;
-    const message = selectedConversation.messages.find((item) => item.id === messageId);
-    const taskId = message?.proposal?.taskId;
-    if (!taskId) return;
-    const result = await window.novalAPI.rejectTask(taskId);
-    if (!result?.ok) {
-      showNotification(`拒绝失败：${result?.error || '未知错误'}`, 'error');
-      return;
-    }
-    if (result.task) setTasks((current) => [result.task, ...current.filter((item) => item.id !== taskId)]);
-    setActiveTaskId('');
-    showNotification('候选稿已拒绝，正式作品没有变化', 'info');
   };
 
   const handleResolveStoryConflict = async (choice: 'keep' | 'accept' | 'cancel') => {
@@ -757,13 +1010,13 @@ export function ProjectPage() {
     setActiveTaskId('');
     if (choice === 'accept') {
       await startPiTask(
-        'rewrite',
-        `作者确认接受新方向。请统一处理以下冲突及其后续影响：${String(task.result?.conflict || '')}`,
+        task.taskType,
+        `请根据以下冲突和可选处理重新执行本任务，不得绕过原有检查：${String(task.result?.conflict || '')}\n${Array.isArray(task.result?.options) ? task.result.options.join('；') : ''}`,
         task.target || null
       );
       return;
     }
-    showNotification(choice === 'keep' ? '已保持原方向，正式作品没有变化' : '已取消本次要求', 'info');
+    showNotification(choice === 'keep' ? '已保持现状，正式作品没有变化' : '已取消本次要求', 'info');
   };
 
   const handleCreateRevisionFromReview = async () => {
@@ -925,6 +1178,14 @@ export function ProjectPage() {
         </div>
 
         <div className="flex items-center gap-4">
+          <button
+            type="button"
+            onClick={() => setActiveTabId('graph')}
+            className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs transition-colors"
+            style={{ border: '1px solid #D7D7E0', background: activeTabId === 'graph' ? '#E9EEFA' : '#FFFFFF', color: activeTabId === 'graph' ? '#3159A8' : '#6E6E8A' }}
+          >
+            <NetworkIcon size={12} /> 关系图谱
+          </button>
           {totalWords > 0 && (
             <div className="flex items-center gap-1.5" style={{ color: '#9999B3' }}>
               <span style={{ color: '#9999B3' }} className="text-xs">
@@ -992,6 +1253,18 @@ export function ProjectPage() {
         </div>
       )}
 
+      {analysisBarRun && currentSource === 'workspace' && (
+        <AnalysisStatusBar
+          run={analysisBarRun}
+          onStart={handleStartAnalysis}
+          onPause={handlePauseAnalysis}
+          onResume={handleResumeAnalysis}
+          onCancel={handleCancelAnalysis}
+          onRetry={handleRetryAnalysis}
+          onSetConcurrency={handleAnalysisConcurrency}
+        />
+      )}
+
       <div className="flex flex-1 overflow-hidden">
         <div className="flex-shrink-0 overflow-hidden" style={{ width: '264px' }}>
           <LeftPanel
@@ -1002,22 +1275,37 @@ export function ProjectPage() {
           />
         </div>
 
-        <div className="flex-1 overflow-hidden">
-          <MiddlePanel
-            selectedConversation={selectedConversation}
-            activeDoc={activeDoc}
-            isGenerating={isGenerating}
-            onSendMessage={handleSendMessage}
-            onPinProposal={handlePinProposal}
-            onContinueProposal={handleContinueProposal}
-            onRejectProposal={handleRejectProposal}
-            onResolveConflict={handleResolveStoryConflict}
-            onCreateRevisionFromReview={handleCreateRevisionFromReview}
-            onStopTask={handleStopTask}
-            onRetryTask={handleRetryTask}
-            onAbandonTask={handleAbandonTask}
-            onCloseDoc={handleCloseDoc}
-          />
+        <div className="flex flex-1 overflow-hidden">
+          <div className="min-w-[300px] flex-1 overflow-hidden">
+            <MiddlePanel
+              selectedConversation={selectedConversation}
+              activeDoc={activeDoc}
+              isGenerating={isGenerating || analysisLocked}
+              onSendMessage={handleSendMessage}
+              onOpenChanges={handleOpenChanges}
+              onContinueProposal={handleContinueProposal}
+              onResolveConflict={handleResolveStoryConflict}
+              onCreateRevisionFromReview={handleCreateRevisionFromReview}
+              onStopTask={handleStopTask}
+              onRetryTask={handleRetryTask}
+              onAbandonTask={handleAbandonTask}
+              onCloseDoc={() => handleCloseDoc()}
+            />
+          </div>
+
+          {(diffTask || openDocs.length > 0 || activeTabId === 'graph') && (
+            <div className={`${activeTabId === 'graph' ? 'w-[72%] min-w-[620px]' : 'w-[56%] min-w-[420px] max-w-[820px]'} flex-shrink-0 overflow-hidden`}>
+              <DocumentWorkspace
+                documents={openDocs}
+                activeTabId={activeTabId}
+                diffTask={diffTask}
+                graph={analysisGraph}
+                onOpenEvidence={handleOpenEvidence}
+                onSelectTab={setActiveTabId}
+                onCloseDocument={handleCloseDoc}
+              />
+            </div>
+          )}
         </div>
 
         <div className="flex-shrink-0 overflow-hidden transition-[width] duration-200" style={{ width: rightCollapsed ? '44px' : '304px' }}>

@@ -19,6 +19,27 @@ contextBridge.exposeInMainWorld("novalAPI", {
     ipcRenderer.invoke("workspace:mergeConflict", { root, relativePath, content }),
   importLegacyProject: () => ipcRenderer.invoke("workspace:importLegacy"),
   importNovel: (project) => ipcRenderer.invoke("workspace:importNovel", { project }),
+  onNovelImportProgress: (listener) => {
+    const handler = (_event, payload) => listener(payload);
+    ipcRenderer.on("workspace:importProgress", handler);
+    return () => ipcRenderer.removeListener("workspace:importProgress", handler);
+  },
+  startAnalysis: (payload) => ipcRenderer.invoke("analysis:start", payload),
+  getAnalysisStatus: (root, runId) => ipcRenderer.invoke("analysis:status", { root, runId }),
+  pauseAnalysis: (runId) => ipcRenderer.invoke("analysis:pause", { runId }),
+  resumeAnalysis: (root, runId) => ipcRenderer.invoke("analysis:resume", { root, runId }),
+  cancelAnalysis: (runId) => ipcRenderer.invoke("analysis:cancel", { runId }),
+  retryAnalysis: (root, workflowId, input) =>
+    ipcRenderer.invoke("analysis:retryFailed", { root, workflowId, input }),
+  setAnalysisConcurrency: (runId, maxConcurrency) =>
+    ipcRenderer.invoke("analysis:setConcurrency", { runId, maxConcurrency }),
+  getGraph: (root) => ipcRenderer.invoke("graph:get", { root }),
+  resolveGraphEvidence: (root, ref) => ipcRenderer.invoke("graph:resolveEvidence", { root, ref }),
+  onAnalysisEvent: (listener) => {
+    const handler = (_event, payload) => listener(payload);
+    ipcRenderer.on("analysis:event", handler);
+    return () => ipcRenderer.removeListener("analysis:event", handler);
+  },
   listDraftProjects: () => ipcRenderer.invoke("drafts:list"),
   saveDraftProject: (payload) => ipcRenderer.invoke("drafts:save", payload),
   openDraftProject: (draftId) => ipcRenderer.invoke("drafts:open", { draftId }),

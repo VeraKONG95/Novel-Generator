@@ -1,0 +1,15 @@
+{
+  "id": "WF07",
+  "version": "1.2.0",
+  "trigger": "continue_chapter",
+  "maxRetries": 2,
+  "writesGraph": false,
+  "nodes": [
+    { "id": "select", "role": "R14", "required": true },
+    { "id": "plan", "role": "R15", "dependsOn": ["select"], "required": true },
+    { "id": "write", "role": "R16", "dependsOn": ["plan"], "required": true },
+    { "id": "review", "role": "R17", "dependsOn": ["write"], "expand": "reviewPerspectives", "parallel": true, "required": true },
+    { "id": "merge", "type": "program", "dependsOn": ["review"], "required": true }
+  ],
+  "writableFiles": ["chapters/*.md"]
+}

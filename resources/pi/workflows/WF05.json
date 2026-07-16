@@ -1,0 +1,13 @@
+{
+  "id": "WF05",
+  "version": "1.4.0",
+  "trigger": "consistency_check",
+  "maxRetries": 2,
+  "writesGraph": false,
+  "nodes": [
+    { "id": "select", "role": "R14", "required": true },
+    { "id": "checks", "role": "R12", "dependsOn": ["select"], "expand": "checkPerspectives", "parallel": true, "required": true },
+    { "id": "merge", "type": "program", "dependsOn": ["checks"], "required": true }
+  ],
+  "writableFiles": []
+}

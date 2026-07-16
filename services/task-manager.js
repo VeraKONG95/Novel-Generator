@@ -20,7 +20,7 @@ async function fileExists(filePath) {
 }
 
 class TaskManager {
-  constructor({ utilityProcess, workerPath, userDataDir, onEvent }) {
+  constructor({ utilityProcess, workerPath, userDataDir, onEvent, workflowRunner = null }) {
     this.utilityProcess = utilityProcess;
     this.workerPath = workerPath;
     this.userDataDir = userDataDir;
@@ -32,6 +32,8 @@ class TaskManager {
     this.activeTaskId = "";
     this.pendingProbe = null;
     this.messageQueue = Promise.resolve();
+    this.workflowRunner = workflowRunner;
+    this.workflowPromises = new Map();
   }
 
   taskRoot(workspaceRoot, taskId) {
@@ -123,7 +125,7 @@ class TaskManager {
     return task;
   }
 
-  async start({ taskType, instruction, target, context, settings, baseRevisions = {}, workspaceRoot = "", projectId = "", conversationId = "", conversationTitle = "" }) {
+  async start({ taskType, instruction, target, context, settings, baseRevisions = {}, workspaceRoot = "", projectId = "", conversationId = "", conversationTitle = "", contextRetryCount = 0 }) {
     if (this.activeTaskId) throw new Error("当前已有任务正在运行，请等待完成或先停止。" );
     if (!settings?.apiKey) throw new Error("请先配置并检查模型。" );
     const id = `task-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
@@ -140,6 +142,8 @@ class TaskManager {
       status: "queued",
       plan: [],
       materials: (context?.documents || []).map((item) => ({ id: item.id, title: item.title })),
+      contextSelection: context?.contextSelection || null,
+      contextRetryCount: Math.max(0, Number(contextRetryCount) || 0),
       assistantText: "",
       result: null,
       error: "",
@@ -156,6 +160,27 @@ class TaskManager {
     await this.updateTask(id, { status: "reading" }, { type: "stage", stage: "reading", text: "正在读取相关创作资料" });
 
     try {
+      if (workspaceRoot && this.workflowRunner?.supports?.(taskType)) {
+        const run = await this.workflowRunner.start({
+          taskId: id,
+          taskType,
+          instruction: task.instruction,
+          target: task.target,
+          context,
+          settings,
+          workspaceRoot,
+          projectId,
+          maxConcurrency: settings?.analysisMaxConcurrency
+        });
+        await this.updateTask(
+          id,
+          { status: "planning", workflowRunId: run.runId, workflowId: run.workflowId || "" },
+          { type: "stage", stage: "planning", text: "正在按创作流程准备和检查" }
+        );
+        const observed = this.observeWorkflow(id, run.runId);
+        this.workflowPromises.set(id, observed);
+        return { ...this.tasks.get(id) };
+      }
       await this.ensureWorker();
       this.worker.postMessage({
         type: "run",
@@ -168,6 +193,54 @@ class TaskManager {
       throw error;
     }
     return { ...task };
+  }
+
+  async observeWorkflow(taskId, runId) {
+    try {
+      const run = await this.workflowRunner.wait(runId);
+      const task = this.tasks.get(taskId);
+      if (!task || TERMINAL_STATUSES.has(task.status)) return task ? { ...task } : null;
+      if (run?.status === "cancelled") {
+        return this.failTask(taskId, "任务已由作者停止，正式内容没有被修改。", "stopped");
+      }
+      if (!run || run.status === "failed" || !run.result) {
+        return this.failTask(taskId, run?.error || "创作流程没有产生可用结果。", "failed");
+      }
+      return this.completeTaskResult(taskId, run.result);
+    } catch (error) {
+      const task = this.tasks.get(taskId);
+      if (!task || TERMINAL_STATUSES.has(task.status)) return task ? { ...task } : null;
+      return this.failTask(taskId, error instanceof Error ? error.message : String(error), "failed");
+    }
+  }
+
+  async completeTaskResult(taskId, result) {
+    const task = this.tasks.get(taskId);
+    if (!task || TERMINAL_STATUSES.has(task.status)) return task ? { ...task } : null;
+    const awaiting = ["candidate", "conflict", "question"].includes(result?.kind);
+    const plan = String(task.assistantText || "")
+      .split(/\r?\n/)
+      .map((line) => line.replace(/^\s*(?:[-*]|\d+[.、)])\s*/, "").trim())
+      .filter(Boolean)
+      .slice(0, 5);
+    const root = this.taskRoot(task.workspaceRoot, task.id);
+    await fs.mkdir(root, { recursive: true });
+    await fs.writeFile(path.join(root, "result.json"), JSON.stringify(result, null, 2), "utf8");
+    const latest = this.tasks.get(taskId);
+    if (!latest || TERMINAL_STATUSES.has(latest.status)) return latest ? { ...latest } : null;
+    const updated = await this.updateTask(
+      task.id,
+      {
+        status: awaiting ? "awaiting_confirmation" : "completed",
+        plan,
+        result,
+        contextSelection: result?.contextSelection || task.contextSelection || null,
+        finishedAt: awaiting ? "" : nowIso()
+      },
+      { type: "result", kind: result?.kind || "unknown" }
+    );
+    if (this.activeTaskId === task.id) this.activeTaskId = "";
+    return updated;
   }
 
   async handleWorkerMessage(message) {
@@ -202,27 +275,7 @@ class TaskManager {
     }
 
     if (message.channel === "task-result") {
-      const result = message.result;
-      const awaiting = ["candidate", "conflict", "question", "memory_confirmation"].includes(result?.kind);
-      const plan = String(task.assistantText || "")
-        .split(/\r?\n/)
-        .map((line) => line.replace(/^\s*(?:[-*]|\d+[.、)])\s*/, "").trim())
-        .filter(Boolean)
-        .slice(0, 5);
-      const root = this.taskRoot(task.workspaceRoot, task.id);
-      await fs.mkdir(root, { recursive: true });
-      await fs.writeFile(path.join(root, "result.json"), JSON.stringify(result, null, 2), "utf8");
-      await this.updateTask(
-        task.id,
-        {
-          status: awaiting ? "awaiting_confirmation" : "completed",
-          plan,
-          result,
-          finishedAt: awaiting ? "" : nowIso()
-        },
-        { type: "result", kind: result?.kind || "unknown" }
-      );
-      this.activeTaskId = "";
+      await this.completeTaskResult(task.id, message.result);
       return;
     }
 
@@ -250,23 +303,32 @@ class TaskManager {
   async stop(taskId) {
     const task = this.tasks.get(taskId);
     if (!task || !ACTIVE_STATUSES.has(task.status)) return task ? { ...task } : null;
+    if (task.workflowRunId && this.workflowRunner?.cancel) {
+      const stopped = await this.failTask(taskId, "任务已由作者停止，正式内容没有被修改。", "stopped");
+      try { await this.workflowRunner.cancel(task.workflowRunId); }
+      catch { /* The local stopped state remains authoritative for a failed cancel request. */ }
+      return stopped;
+    }
     if (this.worker && this.activeTaskId === taskId) {
       this.worker.postMessage({ type: "abort", taskId });
     }
     return this.failTask(taskId, "任务已由作者停止，正式内容没有被修改。", "stopped");
   }
 
-  async decide(taskId, decision) {
+  async decide(taskId, decision, resultOverride = null) {
     const task = this.tasks.get(taskId);
     if (!task) throw new Error("任务不存在。" );
     if (task.status !== "awaiting_confirmation") throw new Error("当前任务不在等待确认状态。" );
     const status = decision === "accept" ? "completed" : "rejected";
-    const compactResult = task.result?.kind === "candidate" && Array.isArray(task.result?.changes)
-      ? {
-          ...task.result,
-          changes: task.result.changes.map((item) => ({ path: item.path, action: item.action, reason: item.reason || "" }))
-        }
-      : task.result;
+    const sourceResult = resultOverride || task.result;
+    const compactResult = decision === "accept"
+      ? sourceResult
+      : sourceResult?.kind === "candidate" && Array.isArray(sourceResult?.changes)
+        ? {
+            ...sourceResult,
+            changes: sourceResult.changes.map((item) => ({ path: item.path, action: item.action, reason: item.reason || "" }))
+          }
+        : sourceResult;
     const updated = await this.updateTask(
       taskId,
       { status, decision, result: compactResult, finishedAt: nowIso() },
@@ -339,6 +401,11 @@ class TaskManager {
       if (!(await fileExists(filePath))) continue;
       try {
         const task = JSON.parse(await fs.readFile(filePath, "utf8"));
+        const liveTask = this.tasks.get(task.id);
+        if (liveTask && this.activeTaskId === task.id && RUNNING_STATUSES.has(liveTask.status)) {
+          tasks.push({ ...liveTask });
+          continue;
+        }
         if (RUNNING_STATUSES.has(task.status)) {
           task.status = "interrupted";
           task.error = "应用上次在任务完成前关闭，正式内容没有被修改。";

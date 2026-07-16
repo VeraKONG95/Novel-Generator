@@ -1,0 +1,12 @@
+{
+  "id": "WF04",
+  "version": "1.3.0",
+  "trigger": "query",
+  "maxRetries": 1,
+  "writesGraph": false,
+  "nodes": [
+    { "id": "select", "role": "R14", "required": true },
+    { "id": "answer", "role": "R16", "dependsOn": ["select"], "required": true }
+  ],
+  "writableFiles": []
+}

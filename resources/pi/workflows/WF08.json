@@ -1,0 +1,17 @@
+{
+  "id": "WF08",
+  "version": "1.4.0",
+  "trigger": "rebuild",
+  "maxRetries": 2,
+  "writesGraph": true,
+  "nodes": [
+    { "id": "impact", "type": "program", "required": true },
+    { "id": "extract", "role": "R03", "dependsOn": ["impact"], "expand": "affectedChapters", "parallel": true, "required": false },
+    { "id": "unify", "role": "R04", "dependsOn": ["extract"], "required": true },
+    { "id": "timeline", "role": "R05", "dependsOn": ["unify"], "required": false },
+    { "id": "tracks", "role": "R12", "dependsOn": ["timeline"], "expand": "affectedTracks", "parallel": true, "required": true },
+    { "id": "materials", "role": "R13", "dependsOn": ["tracks"], "required": true },
+    { "id": "publish", "type": "program", "dependsOn": ["materials"], "required": true }
+  ],
+  "writableFiles": ["knowledge/CURRENT.json", "knowledge/generations/**"]
+}

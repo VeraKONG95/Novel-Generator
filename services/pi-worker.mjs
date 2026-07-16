@@ -81,7 +81,7 @@ function buildTools(context, materialLimit) {
   const submitCandidate = {
     name: "submit_candidate",
     label: "提交文件改动",
-    description: "提交等待作者确认的文件改动清单。正式文件不会在此动作中被修改。",
+    description: "提交将由系统自动写入的文件改动清单。必须提供每个目标文件的完整最终内容。",
     parameters: Type.Object({
       title: Type.String(),
       summary: Type.String(),
@@ -104,7 +104,7 @@ function buildTools(context, materialLimit) {
         }
       }
       activeResult = { kind: "candidate", ...params };
-      return textResult("文件改动已安全保存，正在等待作者确认。", activeResult, true);
+      return textResult("文件改动已提交，系统将自动写入并展示修改对照。", activeResult, true);
     }
   };
 
@@ -173,7 +173,7 @@ function buildTools(context, materialLimit) {
       const requiresConfirmation = params.changes.some((item) => item.requiresAuthorConfirmation);
       activeResult = { kind: requiresConfirmation ? "memory_confirmation" : "memory", ...params };
       return textResult(
-        requiresConfirmation ? "检测到核心设定变化，正在等待作者确认。" : "记忆变更已提交。",
+        requiresConfirmation ? "检测到核心设定变化，系统将记录并自动更新。" : "记忆变更已提交。",
         activeResult,
         true
       );

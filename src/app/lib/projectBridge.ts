@@ -1,7 +1,7 @@
 import { Chapter, Character, DraftProjectSummary, NovalMemory, NovalProject, Project, RecentProjectSummary, WorldSetting } from '../types';
 
 const RECENT_PROJECTS_KEY = 'noval.recentProjects';
-const PROJECT_SCHEMA_VERSION = 4;
+const PROJECT_SCHEMA_VERSION = 5;
 
 function nowIso() {
   return new Date().toISOString();
@@ -39,6 +39,7 @@ export function createDefaultProject(seed?: {
     agents: '',
     creationMode: seed?.creationMode || '平衡型',
     importStatus: '',
+    importSource: { fileName: '', format: '', pageCount: 0, pagesWithoutText: [], pageMap: [], warnings: [] },
     constitutionStatus: 'draft',
     createdAt: timestamp,
     updatedAt: timestamp,
@@ -82,6 +83,16 @@ export function createDefaultProject(seed?: {
     },
     memory: emptyMemory(),
     storyState: emptyStoryState(),
+    analysis: {
+      status: 'uninitialized',
+      runId: '',
+      generationId: '',
+      workflowId: '',
+      blockingGaps: [],
+      nonBlockingGaps: [],
+      updatedAt: ''
+    },
+    analysisSettings: { maxConcurrency: 4 },
     documents: {
       characterArchive: '',
       stagePlan: '',

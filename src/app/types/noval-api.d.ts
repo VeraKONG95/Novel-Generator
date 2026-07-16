@@ -1,4 +1,4 @@
-import { NovalProject } from './index';
+import { AnalysisRunStatus, GraphEvidenceRef, NovalGraph, NovalProject } from './index';
 
 declare global {
   interface Window {
@@ -18,6 +18,27 @@ declare global {
       mergeWorkspaceConflict: (root: string, relativePath: string, content: string) => Promise<any>;
       importLegacyProject: () => Promise<any>;
       importNovel: (project: NovalProject) => Promise<any>;
+      onNovelImportProgress: (listener: (payload: {
+        percent: number;
+        message: string;
+        currentPage?: number;
+        totalPages?: number;
+      }) => void) => () => void;
+      startAnalysis: (payload: {
+        root: string;
+        workflowId?: string;
+        input?: Record<string, unknown>;
+        maxConcurrency?: number;
+      }) => Promise<{ ok: boolean; data?: AnalysisRunStatus; error?: string }>;
+      getAnalysisStatus: (root: string, runId?: string) => Promise<{ ok: boolean; data: AnalysisRunStatus | null; error?: string }>;
+      pauseAnalysis: (runId: string) => Promise<{ ok: boolean; data?: AnalysisRunStatus; error?: string }>;
+      resumeAnalysis: (root: string, runId: string) => Promise<{ ok: boolean; data?: AnalysisRunStatus; error?: string }>;
+      cancelAnalysis: (runId: string) => Promise<{ ok: boolean; data?: AnalysisRunStatus; error?: string }>;
+      retryAnalysis: (root: string, workflowId?: string, input?: Record<string, unknown>) => Promise<{ ok: boolean; data?: AnalysisRunStatus; error?: string }>;
+      setAnalysisConcurrency: (runId: string, maxConcurrency: number) => Promise<{ ok: boolean; data?: AnalysisRunStatus; error?: string }>;
+      getGraph: (root: string) => Promise<{ ok: boolean; data: NovelGraph | null; error?: string }>;
+      resolveGraphEvidence: (root: string, ref: string | GraphEvidenceRef) => Promise<{ ok: boolean; data?: Record<string, unknown>; error?: string }>;
+      onAnalysisEvent: (listener: (payload: AnalysisRunStatus & { event?: Record<string, unknown> }) => void) => () => void;
       listDraftProjects: () => Promise<any>;
       saveDraftProject: (payload: NovalProject) => Promise<any>;
       openDraftProject: (draftId: string) => Promise<any>;

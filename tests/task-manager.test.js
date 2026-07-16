@@ -35,7 +35,84 @@ function controllableUtilityProcess() {
   };
 }
 
+function controllableWorkflowRunner() {
+  let resolveRun;
+  const completed = new Promise((resolve) => { resolveRun = resolve; });
+  const calls = { started: [], cancelled: [] };
+  return {
+    calls,
+    resolve(result, status = "ready") {
+      resolveRun({ runId: "run-dynamic-1", status, result, error: status === "failed" ? "流程失败" : "" });
+    },
+    api: {
+      supports: (taskType) => ["query", "review", "plan_chapters", "write_chapter"].includes(taskType),
+      start: async (payload) => {
+        calls.started.push(payload);
+        return { runId: "run-dynamic-1", status: "analyzing" };
+      },
+      wait: async () => completed,
+      cancel: async (runId) => { calls.cancelled.push(runId); }
+    }
+  };
+}
+
 describe("task manager", () => {
+  it("runs query, review, planning and writing tasks through the dynamic workflow runner", async () => {
+    const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), "noval-task-workflow-"));
+    const runner = controllableWorkflowRunner();
+    try {
+      const manager = new TaskManager({
+        utilityProcess: fakeUtilityProcess(),
+        workerPath: "fake-worker",
+        userDataDir,
+        workflowRunner: runner.api
+      });
+      const task = await manager.start({
+        taskType: "query",
+        instruction: "顾言为什么信任林默？",
+        context: { documents: [{ id: "graph", title: "关系", content: "顾言信任林默" }] },
+        settings: { apiKey: "x", baseUrl: "http://example.test", model: "fake" },
+        workspaceRoot: userDataDir,
+        projectId: "project-1"
+      });
+      expect(task.workflowRunId).toBe("run-dynamic-1");
+      expect(runner.calls.started[0]).toMatchObject({ taskType: "query", instruction: "顾言为什么信任林默？" });
+
+      runner.resolve({ kind: "answer", answer: "因为林默救过他。", sources: ["第一章"] });
+      await manager.workflowPromises.get(task.id);
+
+      expect(manager.get(task.id)).toMatchObject({
+        status: "completed",
+        result: { kind: "answer", answer: "因为林默救过他。" }
+      });
+    } finally {
+      await fs.rm(userDataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("cancels a dynamic workflow task and ignores its late result", async () => {
+    const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), "noval-task-workflow-stop-"));
+    const runner = controllableWorkflowRunner();
+    try {
+      const manager = new TaskManager({
+        utilityProcess: fakeUtilityProcess(), workerPath: "fake-worker", userDataDir, workflowRunner: runner.api
+      });
+      const task = await manager.start({
+        taskType: "write_chapter", instruction: "续写下一章", context: { documents: [] },
+        settings: { apiKey: "x", baseUrl: "http://example.test", model: "fake" },
+        workspaceRoot: userDataDir, projectId: "project-1"
+      });
+      await manager.stop(task.id);
+      runner.resolve({ kind: "candidate", changes: [{ path: "chapters/0002.md", action: "create", content: "迟到正文" }] });
+      await manager.workflowPromises.get(task.id);
+
+      expect(runner.calls.cancelled).toEqual(["run-dynamic-1"]);
+      expect(manager.get(task.id)).toMatchObject({ status: "stopped", result: null });
+    } finally {
+      await fs.rm(userDataDir, { recursive: true, force: true });
+    }
+  });
+
   it("stops a running task without creating a result", async () => {
     const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), "noval-tasks-"));
     try {
@@ -84,6 +161,29 @@ describe("task manager", () => {
       const tasks = await manager.loadWorkspaceTasks(root);
       expect(tasks[0].status).toBe("interrupted");
       expect(tasks[0].error).toContain("正式内容没有被修改");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not mark an in-memory workflow as interrupted when the page lists tasks again", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "noval-task-live-reload-"));
+    const runner = controllableWorkflowRunner();
+    try {
+      const manager = new TaskManager({
+        utilityProcess: fakeUtilityProcess(), workerPath: "fake", userDataDir: root, workflowRunner: runner.api
+      });
+      const task = await manager.start({
+        taskType: "query", instruction: "关系原因", context: { documents: [] },
+        settings: { apiKey: "x", baseUrl: "http://example.test", model: "fake" },
+        workspaceRoot: root, projectId: "project-1"
+      });
+
+      const listed = await manager.loadWorkspaceTasks(root);
+      expect(listed.find((item) => item.id === task.id).status).toBe("planning");
+      runner.resolve({ kind: "answer", answer: "完成" });
+      await manager.workflowPromises.get(task.id);
+      expect(manager.get(task.id)).toMatchObject({ status: "completed", result: { answer: "完成" } });
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
@@ -161,6 +261,28 @@ describe("task manager", () => {
     }
   });
 
+  it("does not let a result already being persisted undo a simultaneous stop", async () => {
+    const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), "noval-task-stop-race-"));
+    try {
+      const manager = new TaskManager({ utilityProcess: fakeUtilityProcess(), workerPath: "fake", userDataDir });
+      const task = await manager.start({
+        taskType: "rewrite", instruction: "生成较大候选", context: { documents: [] },
+        settings: { apiKey: "x", baseUrl: "http://example.test", model: "fake" }, projectId: "project-1"
+      });
+      const completing = manager.completeTaskResult(task.id, {
+        kind: "candidate", title: "迟到候选", summary: "不应采用",
+        changes: [{ path: "chapters/0002.md", action: "create", content: "正文".repeat(10000) }]
+      });
+      const stopped = await manager.stop(task.id);
+      await completing;
+
+      expect(stopped.status).toBe("stopped");
+      expect(manager.get(task.id)).toMatchObject({ status: "stopped", result: null });
+    } finally {
+      await fs.rm(userDataDir, { recursive: true, force: true });
+    }
+  });
+
   it("serializes rapid worker events without corrupting the task record", async () => {
     const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), "noval-task-events-"));
     const controlled = controllableUtilityProcess();
@@ -211,6 +333,28 @@ describe("task manager", () => {
       expect(listed).toHaveLength(2);
       expect(listed.every((task) => task.conversationId === "conversation-a")).toBe(true);
       expect(listed.every((task) => task.status === "awaiting_confirmation")).toBe(true);
+    } finally {
+      await fs.rm(userDataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the before and after content after an automatic candidate write", async () => {
+    const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), "noval-task-auto-write-"));
+    try {
+      const manager = new TaskManager({ utilityProcess: fakeUtilityProcess(), workerPath: "fake", userDataDir });
+      const task = await manager.start({
+        taskType: "rewrite", instruction: "修改结尾", context: { documents: [] },
+        settings: { apiKey: "x", baseUrl: "http://example.test", model: "fake" }, projectId: "project-1"
+      });
+      await manager.handleWorkerMessage({ channel: "task-result", taskId: task.id, result: {
+        kind: "candidate", changes: [{ path: "chapters/0001.md", action: "update", content: "新结尾" }]
+      }});
+      const completed = await manager.decide(task.id, "accept", {
+        kind: "candidate",
+        changes: [{ path: "chapters/0001.md", action: "update", beforeContent: "旧结尾", content: "新结尾" }]
+      });
+      expect(completed.status).toBe("completed");
+      expect(completed.result.changes[0]).toMatchObject({ beforeContent: "旧结尾", content: "新结尾" });
     } finally {
       await fs.rm(userDataDir, { recursive: true, force: true });
     }

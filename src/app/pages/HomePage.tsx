@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router';
 import {
   PlusIcon,
@@ -54,6 +54,7 @@ export function HomePage() {
   const [renameValue, setRenameValue] = useState('');
   const [busyId, setBusyId] = useState<string | null>(null);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [importProgress, setImportProgress] = useState<{ percent: number; message: string } | null>(null);
   const [notification, setNotification] = useState<{
     msg: string;
     type: 'success' | 'info' | 'error';
@@ -63,6 +64,16 @@ export function HomePage() {
     setNotification({ msg, type });
     window.setTimeout(() => setNotification(null), 2600);
   };
+
+  useEffect(() => {
+    if (!window.novalAPI?.onNovelImportProgress) return;
+    return window.novalAPI.onNovelImportProgress((progress) => {
+      setImportProgress({
+        percent: Math.max(0, Math.min(100, Number(progress?.percent) || 0)),
+        message: String(progress?.message || '正在导入小说')
+      });
+    });
+  }, []);
 
   const handleCreate = async () => {
     if (!newTitle.trim() || !newWorkspacePath.trim() || isCreatingProject) return;
@@ -122,14 +133,24 @@ export function HomePage() {
   };
 
   const handleImportNovel = async () => {
+    if (busyId === 'novel') return;
     setBusyId('novel');
-    const result = await importNovel({ title: `导入小说-${new Date().toLocaleDateString('zh-CN')}` });
-    setBusyId(null);
-    if (result.ok && result.data) {
-      navigate(`/project/${result.data.id}`);
-      showNotification('正文已导入，请先完成读稿建档');
-    } else if (result.error) {
-      showNotification(`导入小说失败：${result.error}`, 'error');
+    setImportProgress(null);
+    try {
+      const result = await importNovel({ title: `导入小说-${new Date().toLocaleDateString('zh-CN')}` });
+      if (result.ok && result.data) {
+        navigate(`/project/${result.data.id}`);
+        const warnings = result.import?.warnings || [];
+        const message = result.analysis
+          ? '正文已导入，后台分析已经开始'
+          : '正文已导入，配置好模型后即可开始分析';
+        showNotification(warnings.length ? `${message}；${warnings[0]}` : message, warnings.length ? 'info' : 'success');
+      } else if (result.error) {
+        showNotification(`导入小说失败：${result.error}`, 'error');
+      }
+    } finally {
+      setBusyId(null);
+      setImportProgress(null);
     }
   };
 
@@ -468,11 +489,19 @@ export function HomePage() {
             </button>
             <button
               onClick={() => void handleImportNovel()}
+              disabled={busyId === 'novel'}
+              aria-busy={busyId === 'novel'}
               className="flex items-center gap-1.5 px-4 py-2 rounded-lg transition-all"
               style={{ border: '1px solid #E0E0EA', color: '#6E6E8A', background: '#FFFFFF' }}
             >
               <BookOpenIcon size={15} />
-              <span className="text-sm">{busyId === 'novel' ? '导入中...' : '导入已有小说'}</span>
+              <span className="text-sm">
+                {busyId === 'novel'
+                  ? importProgress
+                    ? `${importProgress.message} ${Math.round(importProgress.percent)}%`
+                    : '导入中...'
+                  : '导入已有小说'}
+              </span>
             </button>
             <button
               onClick={() => setShowNewModal(true)}
@@ -537,11 +566,13 @@ export function HomePage() {
               </button>
               <button
                 onClick={() => void handleImportNovel()}
+                disabled={busyId === 'novel'}
+                aria-busy={busyId === 'novel'}
                 className="flex items-center gap-1.5 px-5 py-2.5 rounded-lg transition-all"
                 style={{ border: '1px solid #E0E0EA', color: '#6E6E8A', background: '#FFFFFF' }}
               >
                 <BookOpenIcon size={15} />
-                <span className="text-sm">导入已有小说</span>
+                <span className="text-sm">{busyId === 'novel' && importProgress ? `${importProgress.message} ${Math.round(importProgress.percent)}%` : '导入已有小说'}</span>
               </button>
               <button
                 onClick={() => setShowNewModal(true)}

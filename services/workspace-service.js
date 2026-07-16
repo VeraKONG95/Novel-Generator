@@ -2,12 +2,15 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { normalizeProject } = require("./project-schema");
+const { readCurrentGeneration } = require("./analysis/graph-store");
 
 const WORKSPACE_SCHEMA_VERSION = 2;
 const MANAGED_DIRS = ["outline/stages", "outline/chapters", "characters", "chapters", "memory", ".noval/tasks"];
 const AGENTS_INDEX_START = "<!-- NOVAL:PROJECT_INDEX:START -->";
 const AGENTS_INDEX_END = "<!-- NOVAL:PROJECT_INDEX:END -->";
 const VISIBLE_TEXT_EXTENSIONS = new Set([".md", ".markdown", ".txt", ".json", ".jsonl"]);
+const IMPORTABLE_NOVEL_EXTENSIONS = new Set([".md", ".markdown", ".txt", ".pdf"]);
+let pdfLibraryPromise = null;
 
 function safeName(value, fallback = "noval-project") {
   const normalized = String(value || "")
@@ -84,13 +87,15 @@ ${(bible.taboos || []).map((item) => `- ${item}`).join("\n") || "- 待补充"}
 
 ${(bible.continuityRules || []).map((item) => `- ${item}`).join("\n") || "- 正式正文是事实的最终依据"}
 
-## 必须由作者确认
+## 作者决定
 
 - 故事核心和核心人物
 - 全书蓝图和结局方向
 - 当前阶段的关键转折
 - 每一章正式正文
 - 人物核心设定与已确认事实的重大变化
+
+系统从正文整理人物、关系、时间和伏笔时不要求逐项确认。发现理解错误时，作者通过聊天直接修正，修正优先于自动分析。
 `);
 }
 
@@ -103,6 +108,7 @@ function withProjectIndex(content) {
     AGENTS_INDEX_START,
     "## 项目资料索引",
     "",
+    "- 当前分析代次：先读取 `knowledge/CURRENT.json`，再读取它指向的代次；单次任务不得混用不同代次",
     "- 全书蓝图：`outline/book.md`",
     "- 当前阶段：`outline/stages/current.md`",
     "- 近期章节计划：`outline/chapters/`",
@@ -111,7 +117,8 @@ function withProjectIndex(content) {
     "- 文风说明：`STYLE.md`",
     "- 故事记忆：`memory/`",
     "",
-    "使用资料时先读取本文件，再按上述路径读取当前任务真正需要的内容。",
+    "正式程度：作者修正与正式设定 > 正式正文 > 当前代次结构化图谱 > 可读材料 > 页面图谱。",
+    "使用资料时先读取本文件，再锁定当前代次，并按上述路径读取当前任务真正需要的内容。",
     AGENTS_INDEX_END
   ].join("\n");
   return `${withoutManaged ? `${withoutManaged}\n\n` : ""}${index}\n`;
@@ -276,6 +283,14 @@ function projectFileMap(project) {
       creationMode: project.creationMode || "平衡型",
       constitutionStatus: project.constitutionStatus || "draft",
       importStatus: project.importStatus || "",
+      importSource: project.importSource || {},
+      analysis: project.analysis || {},
+      analysisSettings: project.analysisSettings || { maxConcurrency: 4 },
+      chapters: (project.chapters || []).map((chapter) => ({
+        id: chapter.id,
+        index: chapter.index,
+        path: `chapters/${String(chapter.index).padStart(4, "0")}.md`
+      })),
       exportOptions: project.exportOptions || {}
     }, null, 2) + "\n",
     ...memoryFiles(project)
@@ -563,6 +578,7 @@ async function collectVisibleFiles(root) {
     entries.sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name, "zh-CN"));
     for (const entry of entries) {
       if (entry.name === ".noval" || entry.name === ".git" || entry.name === "node_modules") continue;
+      if (prefix === "knowledge" && entry.name === "generations") continue;
       const relPath = prefix ? `${prefix}/${entry.name}` : entry.name;
       const fullPath = assertInside(root, path.join(root, relPath));
       if (entry.isDirectory()) {
@@ -582,7 +598,27 @@ async function collectVisibleFiles(root) {
     }
   }
   await walk(root);
-  return files;
+  try {
+    const current = await readCurrentGeneration(root);
+    if (current) {
+      for (const relativePath of Object.keys(current.manifest.files || {})) {
+        if (!VISIBLE_TEXT_EXTENSIONS.has(path.extname(relativePath).toLowerCase())) continue;
+        const fullPath = path.join(current.materialsRoot, ...relativePath.split("/"));
+        const stat = await fs.stat(fullPath);
+        files.push({
+          path: `knowledge/current/${relativePath}`,
+          name: path.basename(relativePath),
+          directory: `knowledge/current/${path.posix.dirname(relativePath)}`.replace(/\/$/, ""),
+          size: stat.size,
+          updatedAt: stat.mtime.toISOString(),
+          revision: await fileRevision(fullPath)
+        });
+      }
+    }
+  } catch {
+    // A damaged generation is reported by graph APIs; ordinary project files remain viewable.
+  }
+  return files.sort((a, b) => a.path.localeCompare(b.path, "zh-CN"));
 }
 
 async function listWorkspaceFiles(root) {
@@ -591,6 +627,18 @@ async function listWorkspaceFiles(root) {
 
 async function readWorkspaceFile(root, relativePath) {
   const normalized = normalizeVisibleRelativePath(relativePath);
+  if (normalized.startsWith("knowledge/current/")) {
+    const current = await readCurrentGeneration(root);
+    if (!current) throw new Error("项目还没有当前分析结果。");
+    const generationPath = normalized.slice("knowledge/current/".length);
+    if (!current.manifest.files?.[generationPath]) throw new Error("当前代次中不存在这个文件。");
+    const filePath = assertInside(current.materialsRoot, path.join(current.materialsRoot, generationPath));
+    return {
+      path: normalized,
+      content: await fs.readFile(filePath, "utf8"),
+      revision: await fileRevision(filePath)
+    };
+  }
   const filePath = assertInside(root, path.join(root, normalized));
   return {
     path: normalized,
@@ -605,6 +653,13 @@ async function applyWorkspaceChanges(root, rawChanges, options = {}) {
   const seen = new Set();
   const normalizedChanges = changes.map((item) => {
     const relativePath = normalizeVisibleRelativePath(item?.path);
+    if (
+      relativePath === "knowledge/CURRENT.json" ||
+      relativePath.startsWith("knowledge/generations/") ||
+      relativePath.startsWith("knowledge/current/")
+    ) {
+      throw new Error("正式分析结果只能由分析流程发布，普通任务不能直接修改。");
+    }
     if (seen.has(relativePath)) throw new Error(`同一文件不能在一次候选中重复出现：${relativePath}`);
     seen.add(relativePath);
     const action = item?.action === "delete" ? "delete" : item?.action === "create" ? "create" : "update";
@@ -612,14 +667,37 @@ async function applyWorkspaceChanges(root, rawChanges, options = {}) {
   });
   const expected = options.expectedRevisions || {};
   const conflicts = [];
-  for (const change of normalizedChanges) {
-    if (options.force || !(change.path in expected)) continue;
-    const current = await fileRevision(path.join(root, change.path));
-    const base = expected[change.path];
+  const checks = new Map(normalizedChanges.map((change) => [change.path, change]));
+  for (const rawPath of Array.isArray(options.guardPaths) ? options.guardPaths : []) {
+    const guardPath = normalizeVisibleRelativePath(rawPath);
+    if (!checks.has(guardPath)) checks.set(guardPath, { path: guardPath, action: "guard", content: "" });
+  }
+  for (const change of checks.values()) {
+    if (options.force) continue;
+    let current = null;
+    try {
+      current = change.path.startsWith("knowledge/current/")
+        ? (await readWorkspaceFile(root, change.path)).revision
+        : await fileRevision(path.join(root, change.path));
+    } catch {
+      current = null;
+    }
+    const base = Object.prototype.hasOwnProperty.call(expected, change.path) ? expected[change.path] : null;
     if ((current?.hash || null) !== (base?.hash || null)) {
       let externalContent = "";
-      try { externalContent = await fs.readFile(path.join(root, change.path), "utf8"); } catch { externalContent = ""; }
-      conflicts.push({ path: change.path, expected: base, current, externalContent, proposedContent: change.content });
+      try {
+        externalContent = change.path.startsWith("knowledge/current/")
+          ? (await readWorkspaceFile(root, change.path)).content
+          : await fs.readFile(path.join(root, change.path), "utf8");
+      } catch { externalContent = ""; }
+      conflicts.push({
+        path: change.path,
+        expected: base,
+        current,
+        externalContent,
+        proposedContent: change.action === "guard" ? "" : change.content,
+        contextChanged: change.action === "guard"
+      });
     }
   }
   if (conflicts.length) return { ok: false, conflicts };
@@ -648,7 +726,10 @@ async function buildIndex(root, fileMap = null) {
   const documents = [];
   const sourceFiles = fileMap
     ? Object.entries(fileMap).filter(([relPath]) => !relPath.startsWith(".noval/"))
-    : await Promise.all((await collectVisibleFiles(root)).map(async (item) => [item.path, await fs.readFile(path.join(root, item.path), "utf8")]));
+    : await Promise.all((await collectVisibleFiles(root)).map(async (item) => [
+        item.path,
+        (await readWorkspaceFile(root, item.path)).content
+      ]));
   for (const [relPath, content] of sourceFiles) {
     if (!VISIBLE_TEXT_EXTENSIONS.has(path.extname(relPath).toLowerCase())) continue;
     documents.push({
@@ -798,10 +879,16 @@ async function loadWorkspace(root) {
     const chapters = [];
     for (let i = 0; i < names.length; i += 1) {
       const parsed = parseChapterMarkdown(await fs.readFile(path.join(chaptersDir, names[i]), "utf8"), i + 1);
-      const existing = normalized.chapters.find((item) => item.index === parsed.index);
+      const relativePath = `chapters/${names[i]}`;
+      const chapterMeta = Array.isArray(manifest.chapters)
+        ? manifest.chapters.find((item) => item.path === relativePath || Number(item.index) === parsed.index)
+        : null;
+      const existing = normalized.chapters.find((item) =>
+        (chapterMeta?.id && item.id === chapterMeta.id) || item.index === parsed.index
+      );
       chapters.push({
         ...(existing || {}),
-        id: existing?.id || `chapter-${parsed.index}`,
+        id: chapterMeta?.id || existing?.id || `chapter-${crypto.randomUUID()}`,
         index: parsed.index,
         title: parsed.title,
         content: parsed.content,
@@ -838,6 +925,75 @@ async function loadWorkspace(root) {
   if (foreshadowing) {
     normalized.memory.foreshadowing = foreshadowing.memory || [];
     normalized.storyState.foreshadowingRegistry = foreshadowing.registry || [];
+  }
+
+  try {
+    const currentGeneration = await readCurrentGeneration(root);
+    if (currentGeneration) {
+      const criticalGaps = currentGeneration.manifest.gaps?.critical || [];
+      const nonCriticalGaps = currentGeneration.manifest.gaps?.nonCritical || [];
+      const status = criticalGaps.length ? "failed" : nonCriticalGaps.length ? "degraded" : "ready";
+      normalized.analysis = {
+        status,
+        runId: normalized.analysis.runId || "",
+        generationId: currentGeneration.generationId,
+        workflowId: currentGeneration.manifest.workflow?.id || currentGeneration.manifest.workflowId || "",
+        blockingGaps: criticalGaps,
+        nonBlockingGaps: nonCriticalGaps,
+        updatedAt: currentGeneration.manifest.createdAt || ""
+      };
+      normalized.importStatus = status;
+      const currentStyle = path.join(currentGeneration.materialsRoot, "STYLE.md");
+      const currentStage = path.join(currentGeneration.materialsRoot, "outline", "stages", "current.md");
+      if (await exists(currentStyle)) normalized.documents.styleGuide = await fs.readFile(currentStyle, "utf8");
+      if (await exists(currentStage)) normalized.documents.stagePlan = await fs.readFile(currentStage, "utf8");
+
+      const characterPaths = Object.keys(currentGeneration.manifest.files || {})
+        .filter((relativePath) => /^characters\/[^/]+\.md$/.test(relativePath))
+        .sort((a, b) => a.localeCompare(b, "zh-CN"));
+      if (characterPaths.length) {
+        normalized.blueprint.characters = await Promise.all(characterPaths.map(async (relativePath, index) => {
+          const content = await fs.readFile(path.join(currentGeneration.materialsRoot, relativePath), "utf8");
+          const parsed = parseCharacterMarkdown(content, null, index + 1);
+          const entity = currentGeneration.entities.find((item) =>
+            item.canonicalName === parsed.name && ["character", "人物"].includes(item.type)
+          );
+          return { ...parsed, id: entity?.id || parsed.id };
+        }));
+      }
+      normalized.memory.characters = currentGeneration.entities
+        .filter((item) => ["character", "人物"].includes(item.type))
+        .map((item) => ({
+          id: item.id,
+          name: item.canonicalName,
+          content: `${item.status || "active"}${item.aliases?.length ? `；别名：${item.aliases.join("、")}` : ""}`,
+          updatedAt: currentGeneration.manifest.createdAt || new Date().toISOString(),
+          status: item.status || "active"
+        }));
+      normalized.memory.events = currentGeneration.events.map((item) => ({
+        id: item.id || item.eventId,
+        name: item.summary || item.action || item.type,
+        content: item.result || item.summary || item.action || "",
+        updatedAt: currentGeneration.manifest.createdAt || new Date().toISOString(),
+        status: item.status || "active"
+      }));
+      normalized.storyState.knownFacts = currentGeneration.assertions
+        .filter((item) => item.scope === "WORLD")
+        .map((item) => ({
+          id: item.id,
+          name: item.proposition || item.content || "世界事实",
+          content: item.proposition || item.content || "",
+          status: item.truthStatus || "true",
+          updatedAt: currentGeneration.manifest.createdAt || new Date().toISOString()
+        }));
+    }
+  } catch (error) {
+    normalized.analysis = {
+      ...normalized.analysis,
+      status: "failed",
+      blockingGaps: [`当前分析结果损坏：${error instanceof Error ? error.message : String(error)}`],
+      updatedAt: new Date().toISOString()
+    };
   }
 
   const fileMap = projectFileMap(normalized);
@@ -910,13 +1066,223 @@ function splitImportedNovel(content) {
   return chapters.filter((item) => item.lines.join("\n").trim());
 }
 
-async function importNovel(parentDir, sourcePath, seedProject) {
-  const content = await fs.readFile(sourcePath, "utf8");
+function reportImportProgress(onProgress, progress) {
+  if (typeof onProgress !== "function") return;
+  onProgress({
+    percent: Math.max(0, Math.min(100, Math.round(Number(progress.percent) || 0))),
+    message: String(progress.message || "正在导入小说"),
+    currentPage: Number(progress.currentPage) || 0,
+    totalPages: Number(progress.totalPages) || 0
+  });
+}
+
+function pdfItemsToText(items) {
+  const lines = [];
+  let current = [];
+  let lastY = null;
+  let lastEndX = null;
+
+  const flush = () => {
+    const line = current.join("").replace(/[ \t]+/g, " ").trimEnd();
+    if (line.trim()) lines.push(line);
+    current = [];
+    lastEndX = null;
+  };
+
+  for (const item of items || []) {
+    if (!item || typeof item.str !== "string") continue;
+    const transform = Array.isArray(item.transform) ? item.transform : [];
+    const x = Number(transform[4]);
+    const y = Number(transform[5]);
+    const height = Math.max(1, Math.abs(Number(item.height) || Number(transform[3]) || 1));
+    const movedLine = lastY !== null && Number.isFinite(y) && Math.abs(y - lastY) > Math.max(2, height * 0.55);
+    if (movedLine) flush();
+
+    if (
+      current.length &&
+      Number.isFinite(x) &&
+      Number.isFinite(lastEndX) &&
+      x - lastEndX > Math.max(2, height * 0.22)
+    ) {
+      current.push(" ");
+    }
+    current.push(item.str);
+    if (Number.isFinite(x)) lastEndX = x + Math.max(0, Number(item.width) || 0);
+    if (Number.isFinite(y)) lastY = y;
+    if (item.hasEOL) flush();
+  }
+  flush();
+  return lines.join("\n");
+}
+
+function normalizePdfPages(rawPages) {
+  const pages = (Array.isArray(rawPages) ? rawPages : []).map((content, index) => ({
+    pageNumber: index + 1,
+    lines: String(content || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  }));
+  const threshold = Math.max(2, Math.ceil(pages.length * 0.6));
+  const edgeCounts = new Map();
+  for (const page of pages) {
+    const edgeLines = [...page.lines.slice(0, 2), ...page.lines.slice(-2)];
+    for (const line of new Set(edgeLines)) {
+      if (line.length <= 100) edgeCounts.set(line, (edgeCounts.get(line) || 0) + 1);
+    }
+  }
+  const furniture = new Set(
+    Array.from(edgeCounts.entries()).filter(([, count]) => count >= threshold).map(([line]) => line)
+  );
+  const pageNumberPattern = /^(?:第\s*)?\d+(?:\s*页)?$/;
+  const cleaned = pages.map((page) => ({
+    pageNumber: page.pageNumber,
+    lines: page.lines.filter((line, index) => {
+      const isEdge = index < 2 || index >= page.lines.length - 2;
+      return !furniture.has(line) && !(isEdge && pageNumberPattern.test(line));
+    })
+  }));
+
+  const paragraphs = [];
+  const pageMap = [];
+  const headingPattern = /^(?:#{1,3}\s*)?第[零一二三四五六七八九十百千万0-9]+章/;
+  for (const page of cleaned) {
+    for (let lineIndex = 0; lineIndex < page.lines.length; lineIndex += 1) {
+      const line = page.lines[lineIndex];
+      const previous = paragraphs.at(-1);
+      const isFirstLine = lineIndex === 0;
+      const crossesPage = isFirstLine && previous && previous.pageNumber !== page.pageNumber;
+      const continuesPrevious = crossesPage &&
+        !headingPattern.test(line) &&
+        (/[，、；：—…]$/.test(previous.text) || !/[。！？!?；;：:]$/.test(previous.text));
+      if (continuesPrevious) {
+        previous.text += line;
+        pageMap.push({ pageNumber: page.pageNumber, paragraphIndex: paragraphs.length - 1, text: line });
+        continue;
+      }
+      paragraphs.push({ pageNumber: page.pageNumber, text: line });
+      pageMap.push({ pageNumber: page.pageNumber, paragraphIndex: paragraphs.length - 1, text: line });
+    }
+  }
+  return {
+    content: paragraphs.map((item) => item.text).join("\n\n").trim(),
+    pageMap
+  };
+}
+
+async function loadPdfLibrary() {
+  if (!pdfLibraryPromise) {
+    pdfLibraryPromise = import("pdfjs-dist/legacy/build/pdf.mjs");
+  }
+  return pdfLibraryPromise;
+}
+
+async function extractPdfNovel(sourcePath, onProgress) {
+  reportImportProgress(onProgress, { percent: 5, message: "正在打开 PDF" });
+  const pdfjs = await loadPdfLibrary();
+  const data = new Uint8Array(await fs.readFile(sourcePath));
+  const pdfAssetsDir = path.dirname(require.resolve("pdfjs-dist/package.json"));
+  const standardFontDataUrl = `${path.join(pdfAssetsDir, "standard_fonts")}${path.sep}`;
+  const cMapUrl = `${path.join(pdfAssetsDir, "cmaps")}${path.sep}`;
+  let loadingTask;
+  let document;
+  try {
+    loadingTask = pdfjs.getDocument({ data, standardFontDataUrl, cMapUrl, cMapPacked: true });
+    document = await loadingTask.promise;
+  } catch (error) {
+    if (error?.name === "PasswordException") {
+      throw new Error("这个 PDF 受密码保护，请先解除密码后再导入。");
+    }
+    throw new Error(`无法读取这个 PDF：${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  const pages = [];
+  const pagesWithoutText = [];
+  const pageCount = document.numPages;
+  try {
+    for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
+      const page = await document.getPage(pageNumber);
+      const textContent = await page.getTextContent({ disableNormalization: false });
+      const text = pdfItemsToText(textContent.items).trim();
+      if (text.replace(/\s+/g, "").length < 8) pagesWithoutText.push(pageNumber);
+      pages.push(text);
+      page.cleanup();
+      reportImportProgress(onProgress, {
+        percent: 8 + (pageNumber / pageCount) * 72,
+        message: `正在读取 PDF 第 ${pageNumber}/${pageCount} 页`,
+        currentPage: pageNumber,
+        totalPages: pageCount
+      });
+    }
+  } finally {
+    if (loadingTask) await loadingTask.destroy();
+  }
+
+  const normalizedPages = normalizePdfPages(pages);
+  const content = normalizedPages.content;
+  const meaningfulLength = content.replace(/\s+/g, "").length;
+  if (meaningfulLength < 20 || pagesWithoutText.length === pageCount) {
+    const pageHint = pagesWithoutText.length
+      ? `没有识别到文字的页码：${pagesWithoutText.slice(0, 20).join("、")}${pagesWithoutText.length > 20 ? "等" : ""}。`
+      : "";
+    throw new Error(`这个 PDF 可能是扫描图片，无法直接读取正文。${pageHint}请先将它转换为可选择文字的 PDF，或导出为 TXT 后再导入。`);
+  }
+  if ((content.match(/\uFFFD/g) || []).length > meaningfulLength * 0.01) {
+    throw new Error("这个 PDF 提取出的文字存在大量乱码，请先转换为可选择文字的 PDF 或 TXT 后再导入。");
+  }
+
+  const warnings = [];
+  if (pagesWithoutText.length) {
+    warnings.push(`第 ${pagesWithoutText.slice(0, 20).join("、")} 页没有检测到足够文字，请在建档前核对是否为封面、插图或扫描页。`);
+  }
+  return {
+    content,
+    sourceInfo: {
+      format: "pdf",
+      pageCount,
+      pagesWithoutText,
+      pageMap: normalizedPages.pageMap,
+      warnings
+    }
+  };
+}
+
+async function readImportedNovel(sourcePath, onProgress) {
+  const extension = path.extname(sourcePath).toLowerCase();
+  if (!IMPORTABLE_NOVEL_EXTENSIONS.has(extension)) {
+    throw new Error("目前只支持 TXT、Markdown 和 PDF 小说文件。");
+  }
+  if (extension === ".pdf") return extractPdfNovel(sourcePath, onProgress);
+  reportImportProgress(onProgress, { percent: 15, message: "正在读取小说正文" });
+  return {
+    content: await fs.readFile(sourcePath, "utf8"),
+    sourceInfo: { format: extension.slice(1), pageCount: 0, pagesWithoutText: [], warnings: [] }
+  };
+}
+
+async function importNovel(parentDir, sourcePath, seedProject, options = {}) {
+  const { content, sourceInfo } = await readImportedNovel(sourcePath, options.onProgress);
+  reportImportProgress(options.onProgress, { percent: 84, message: "正在识别章节" });
   const parts = splitImportedNovel(content);
+  if (!parts.length) throw new Error("没有在文件中读取到可以导入的小说正文。");
   const project = normalizeProject(seedProject).project;
-  project.importStatus = "needs_archive_confirmation";
+  if (!project.title || project.title === "未命名小说" || /^导入小说(?:-|$)/.test(project.title)) {
+    project.title = path.basename(sourcePath, path.extname(sourcePath));
+  }
+  project.importStatus = "raw_imported";
+  project.importSource = {
+    fileName: path.basename(sourcePath),
+    ...sourceInfo
+  };
+  project.analysis = {
+    ...project.analysis,
+    status: "raw_imported",
+    runId: "",
+    generationId: "",
+    workflowId: "WF01",
+    blockingGaps: ["小说尚未完成分析"],
+    nonBlockingGaps: [],
+    updatedAt: new Date().toISOString()
+  };
   project.chapters = parts.map((part, index) => ({
-    id: `chapter-${index + 1}`,
+    id: `chapter-${crypto.randomUUID()}`,
     index: index + 1,
     title: part.title.replace(/^第.*?章\s*/, "") || part.title,
     goal: "",
@@ -927,7 +1293,31 @@ async function importNovel(parentDir, sourcePath, seedProject) {
     sections: [],
     updatedAt: new Date().toISOString()
   }));
-  return createWorkspace(parentDir, project);
+  if (Array.isArray(project.importSource.pageMap)) {
+    let currentChapter = project.chapters[0] || null;
+    project.importSource.pageMap = project.importSource.pageMap.map((item) => {
+      const text = String(item.text || "").trim();
+      const titleMatch = project.chapters.find((chapter) =>
+        text.includes(chapter.title) || chapter.title.includes(text.replace(/^#+\s*/, ""))
+      );
+      const contentMatch = project.chapters.find((chapter) => String(chapter.content || "").includes(text));
+      currentChapter = titleMatch || contentMatch || currentChapter;
+      const paragraphs = String(currentChapter?.content || "")
+        .split(/\n\s*\n/)
+        .map((paragraph) => paragraph.trim())
+        .filter(Boolean);
+      const paragraphIndex = paragraphs.findIndex((paragraph) => paragraph.includes(text) || text.includes(paragraph));
+      return {
+        ...item,
+        chapterId: currentChapter?.id || "",
+        chapterParagraph: paragraphIndex >= 0 ? paragraphIndex + 1 : 0
+      };
+    });
+  }
+  reportImportProgress(options.onProgress, { percent: 92, message: "正在建立创作空间" });
+  const result = await createWorkspace(parentDir, project);
+  reportImportProgress(options.onProgress, { percent: 100, message: "正文导入完成" });
+  return { ...result, sourceInfo };
 }
 
 async function listDocuments(root) {
@@ -946,7 +1336,8 @@ async function listDocuments(root) {
   for (const item of entries) {
     const filePath = assertInside(root, path.join(root, item.path));
     try {
-      docs.push({ id: item.id, title: item.title, content: await fs.readFile(filePath, "utf8") });
+      const opened = await readWorkspaceFile(root, item.path);
+      docs.push({ id: item.id, title: item.title, content: opened.content });
     } catch {
       // Rebuildable index may briefly reference a deleted external file.
     }
@@ -971,7 +1362,7 @@ async function searchWorkspace(root, query) {
   for (const item of candidates.slice(0, 50)) {
     const filePath = assertInside(root, path.join(root, item.path));
     try {
-      const content = await fs.readFile(filePath, "utf8");
+      const content = (await readWorkspaceFile(root, item.path)).content;
       const lower = content.toLowerCase();
       const at = lower.indexOf(normalizedQuery);
       const start = Math.max(0, at >= 0 ? at - 160 : 0);
@@ -997,10 +1388,12 @@ module.exports = {
   createWorkspace,
   createWorkspaceAtPath,
   detectConflicts,
+  extractPdfNovel,
   importNovel,
   listDocuments,
   listWorkspaceFiles,
   loadWorkspace,
+  normalizePdfPages,
   projectFileMap,
   readWorkspaceFile,
   recoverTransaction,

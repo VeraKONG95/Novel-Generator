@@ -60,7 +60,7 @@ export function LeftPanel({ conversations, selectedConvId, onSelectConversation,
     const isMod = conv.type === 'modification';
     const isTask = conv.type === 'task' || conv.type === 'review';
     const statusText = conv.status === 'awaiting_confirmation'
-      ? '等待确认'
+      ? conv.resultKind === 'question' || conv.resultKind === 'conflict' ? '等待回复' : '写入暂停'
       : conv.status === 'completed'
         ? '已完成'
         : conv.status === 'failed'
