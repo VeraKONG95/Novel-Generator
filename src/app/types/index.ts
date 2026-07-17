@@ -36,7 +36,13 @@ export interface PiTaskResult {
   targetId?: string;
   impact?: string[];
   answer?: string;
-  sources?: string[];
+  sources?: Array<string | {
+    materialId?: string;
+    chapterId?: string;
+    sourcePath?: string;
+    excerpt?: string;
+    evidenceRef?: GraphEvidenceRef;
+  }>;
   summary?: string;
   issues?: Array<Record<string, string>>;
   changes?: Array<Record<string, unknown>>;
@@ -49,6 +55,7 @@ export interface FileChange {
   path: string;
   action: 'create' | 'update' | 'delete';
   content?: string;
+  beforeContent?: string;
   reason?: string;
 }
 
@@ -83,6 +90,12 @@ export interface PiTask {
   result: PiTaskResult | null;
   error: string;
   warnings: string[];
+  contextSelection?: {
+    tokenBudget: number;
+    estimatedTokens: number;
+    selectedEntityIds: string[];
+    materialIds: string[];
+  } | null;
   answers?: Array<{ at: string; answer: string }>;
   questionHistory?: Array<{ askedAt: string; at: string; answer: string; result: PiTaskResult }>;
   streamingSeen?: boolean;
@@ -172,6 +185,12 @@ export interface ActiveDoc {
   title: string;
   content: string;
   path?: string;
+  evidence?: {
+    status: string;
+    paragraphStart?: number;
+    paragraphEnd?: number;
+    excerpt?: string;
+  };
 }
 
 export interface RecentProjectSummary {
@@ -405,6 +424,90 @@ export interface NovalStoryState {
   continuityConstraints: NovalStoryFact[];
 }
 
+export type AnalysisStatus =
+  | 'uninitialized'
+  | 'raw_imported'
+  | 'analyzing'
+  | 'paused'
+  | 'ready'
+  | 'degraded'
+  | 'failed'
+  | 'cancelled';
+
+export interface AnalysisRunStatus {
+  runId: string;
+  projectId: string;
+  category?: 'project_analysis' | 'creative_task';
+  ownerTaskId?: string;
+  workflowId: string;
+  workflowVersion: string;
+  status: AnalysisStatus;
+  stage: string;
+  counts: { total: number; completed: number; running: number; failed: number; waiting: number };
+  maxConcurrency: number;
+  actualConcurrency: number;
+  currentItems: string[];
+  blockingGaps: string[];
+  nonBlockingGaps: string[];
+  hasBlockingGaps: boolean;
+  generationId: string;
+  error: string;
+  createdAt: string;
+  updatedAt: string;
+  finishedAt: string;
+  recovered?: boolean;
+}
+
+export interface GraphEvidenceRef {
+  refId?: string;
+  sourcePath?: string;
+  chapterId?: string;
+  paragraphHash?: string;
+  occurrenceIndex?: number;
+  paragraphStart?: number;
+  paragraphEnd?: number;
+  excerpt?: string;
+  [key: string]: unknown;
+}
+
+export interface NovelGraphNode {
+  id: string;
+  label: string;
+  type: string;
+  canonicalName?: string;
+  status?: string;
+  confidence?: string;
+  aliases?: string[];
+  evidenceRefs?: GraphEvidenceRef[];
+  [key: string]: unknown;
+}
+
+export interface NovelGraphEdge {
+  id: string;
+  source: string;
+  target: string;
+  type: string;
+  strength?: string | null;
+  scope?: string;
+  confidence?: string;
+  status?: string;
+  validFrom?: number | string | null;
+  validTo?: number | string | null;
+  narrativeFrom?: number | string | null;
+  narrativeTo?: number | string | null;
+  evidenceRefs?: GraphEvidenceRef[];
+  [key: string]: unknown;
+}
+
+export interface NovelGraph {
+  generationId: string;
+  graphFormatVersion: number;
+  nodes: NovelGraphNode[];
+  edges: NovelGraphEdge[];
+  chapterIndex: Record<string, Record<string, unknown>>;
+  evidenceIndex: Record<string, GraphEvidenceRef>;
+}
+
 export interface NovalProject {
   schemaVersion: number;
   id: string;
@@ -412,6 +515,14 @@ export interface NovalProject {
   agents: string;
   creationMode: '规划型' | '平衡型' | '探索型' | string;
   importStatus: string;
+  importSource: {
+    fileName: string;
+    format: string;
+    pageCount: number;
+    pagesWithoutText: number[];
+    pageMap: Array<{ pageNumber: number; paragraphIndex: number; chapterId?: string; chapterParagraph?: number; text: string }>;
+    warnings: string[];
+  };
   constitutionStatus: 'draft' | 'confirmed' | string;
   createdAt: string;
   updatedAt: string;
@@ -449,6 +560,16 @@ export interface NovalProject {
   };
   memory: NovalMemory;
   storyState: NovalStoryState;
+  analysis: {
+    status: AnalysisStatus;
+    runId: string;
+    generationId: string;
+    workflowId: string;
+    blockingGaps: string[];
+    nonBlockingGaps: string[];
+    updatedAt: string;
+  };
+  analysisSettings: { maxConcurrency: number };
   documents: {
     characterArchive: string;
     stagePlan: string;

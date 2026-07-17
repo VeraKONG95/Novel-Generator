@@ -9,9 +9,19 @@ describe("Pi prompt policy", () => {
     expect(classifyTask("重新规划近期三章")).toBe("plan_chapters");
   });
 
-  it("keeps confirmation, truth and permission boundaries in every task", () => {
+  it("keeps questions, reviews, planning and continuation on their workflows when a file is open", () => {
+    expect(classifyTask("他们为什么会决裂？", "file")).toBe("query");
+    expect(classifyTask("检查这里有没有认知泄漏", "file")).toBe("review");
+    expect(classifyTask("规划接下来三章", "file")).toBe("plan_chapters");
+    expect(classifyTask("规划下一章", "file")).toBe("plan_chapters");
+    expect(classifyTask("计划下一章", "file")).toBe("plan_chapters");
+    expect(classifyTask("续写下一章", "file")).toBe("write_chapter");
+    expect(classifyTask("把这里润色得更克制", "file")).toBe("rewrite");
+  });
+
+  it("keeps truth, automatic-write and permission boundaries in every task", () => {
     expect(BASE_SYSTEM_PROMPT).toContain("正式正文是事实的最终依据");
-    expect(BASE_SYSTEM_PROMPT).toContain("等待作者确认");
+    expect(BASE_SYSTEM_PROMPT).toContain("系统会自动写入");
     expect(BASE_SYSTEM_PROMPT).toContain("不能访问其他位置");
     expect(BASE_SYSTEM_PROMPT).toContain("不得用模板");
     const prompt = buildTaskPrompt({

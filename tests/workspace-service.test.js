@@ -2,14 +2,18 @@ const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const { createDefaultProject } = require("../services/project-schema");
+const { publishGeneration } = require("../services/analysis/graph-store");
 const {
   assertInside,
   applyWorkspaceChanges,
   createWorkspace,
   createWorkspaceAtPath,
+  extractPdfNovel,
   importNovel,
   loadWorkspace,
   listWorkspaceFiles,
+  normalizePdfPages,
+  readWorkspaceFile,
   recoverTransaction,
   saveWorkspace,
   searchWorkspace,
@@ -26,6 +30,32 @@ async function tempParent() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "noval-workspace-"));
   cleanup.push(dir);
   return dir;
+}
+
+function simplePdf(text = "") {
+  const escaped = String(text).replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
+  const stream = escaped ? `BT\n/F1 12 Tf\n72 720 Td\n(${escaped}) Tj\nET\n` : "";
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+    `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}endstream`,
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
+  ];
+  let output = "%PDF-1.4\n";
+  const offsets = [0];
+  objects.forEach((object, index) => {
+    offsets.push(Buffer.byteLength(output));
+    output += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  });
+  const xrefOffset = Buffer.byteLength(output);
+  output += `xref\n0 ${objects.length + 1}\n`;
+  output += "0000000000 65535 f \n";
+  offsets.slice(1).forEach((offset) => {
+    output += `${String(offset).padStart(10, "0")} 00000 n \n`;
+  });
+  output += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
+  return Buffer.from(output);
 }
 
 describe("workspace service", () => {
@@ -174,7 +204,7 @@ describe("workspace service", () => {
     expect(log).toContain("灯塔的光掠过海面");
   });
 
-  it("imports an existing novel as formal chapters and blocks continuation until archive confirmation", async () => {
+  it("imports an existing novel with stable chapter ids and marks it ready for automatic analysis", async () => {
     const parent = await tempParent();
     const sourcePath = path.join(parent, "已有小说.md");
     await fs.writeFile(sourcePath, "# 第一章 雨夜\n第一章正文\n\n# 第二章 来信\n第二章正文", "utf8");
@@ -182,10 +212,58 @@ describe("workspace service", () => {
     seed.title = "导入验收";
     const imported = await importNovel(parent, sourcePath, seed);
     const loaded = await loadWorkspace(imported.root);
-    expect(loaded.data.importStatus).toBe("needs_archive_confirmation");
+    expect(loaded.data.importStatus).toBe("raw_imported");
+    expect(loaded.data.analysis.status).toBe("raw_imported");
     expect(loaded.data.chapters).toHaveLength(2);
     expect(loaded.data.chapters[1].content).toContain("第二章正文");
+    expect(loaded.data.chapters.map((chapter) => chapter.id)).toEqual(
+      imported.data.chapters.map((chapter) => chapter.id)
+    );
+    expect(loaded.data.chapters.every((chapter) => /^chapter-[a-f0-9-]{36}$/.test(chapter.id))).toBe(true);
     expect(await fs.readFile(sourcePath, "utf8")).toContain("第一章正文");
+  });
+
+  it("imports selectable text from a PDF and reports page progress", async () => {
+    const parent = await tempParent();
+    const sourcePath = path.join(parent, "Existing-Novel.pdf");
+    await fs.writeFile(sourcePath, simplePdf("A long opening chapter imported from a PDF novel."));
+    const progress = [];
+
+    const imported = await importNovel(parent, sourcePath, createDefaultProject(), {
+      onProgress: (item) => progress.push(item)
+    });
+    const loaded = await loadWorkspace(imported.root);
+
+    expect(imported.sourceInfo.format).toBe("pdf");
+    expect(imported.sourceInfo.pageCount).toBe(1);
+    expect(loaded.data.importSource.pageCount).toBe(1);
+    expect(loaded.data.importSource.pageMap[0]).toMatchObject({ pageNumber: 1 });
+    expect(loaded.data.importSource.pageMap[0].chapterId).toBe(loaded.data.chapters[0].id);
+    expect(loaded.data.title).toBe("Existing-Novel");
+    expect(loaded.data.chapters[0].content).toContain("opening chapter imported from a PDF novel");
+    expect(progress.some((item) => item.currentPage === 1 && item.totalPages === 1)).toBe(true);
+    expect(progress.at(-1).percent).toBe(100);
+  });
+
+  it("rejects an image-only PDF instead of silently creating an empty novel", async () => {
+    const parent = await tempParent();
+    const sourcePath = path.join(parent, "Scanned-Novel.pdf");
+    await fs.writeFile(sourcePath, simplePdf());
+
+    await expect(extractPdfNovel(sourcePath)).rejects.toThrow("扫描图片");
+  });
+
+  it("removes repeated PDF furniture and keeps page-to-paragraph evidence mapping", () => {
+    const normalized = normalizePdfPages([
+      "雾港来信\n第一章 雨夜\n林默走到门前，\n1",
+      "雾港来信\n却没有敲门。\n第二章 回声\n顾言听见潮声。\n2",
+      "雾港来信\n第三章 灯塔\n灯塔熄灭了。\n3"
+    ]);
+
+    expect(normalized.content).not.toContain("雾港来信\n");
+    expect(normalized.content).toContain("林默走到门前，却没有敲门。");
+    expect(normalized.pageMap.some((item) => item.pageNumber === 1 && item.text.includes("林默走到门前"))).toBe(true);
+    expect(normalized.pageMap.some((item) => item.pageNumber === 2 && item.text.includes("却没有敲门"))).toBe(true);
   });
 
   it("keeps creative content out of the internal manifest and exposes only visible files", async () => {
@@ -201,6 +279,29 @@ describe("workspace service", () => {
     expect(files.some((item) => item.path === "AGENTS.md")).toBe(true);
     expect(files.some((item) => item.path.startsWith(".noval/"))).toBe(false);
     expect(await fs.readFile(path.join(created.root, "AGENTS.md"), "utf8")).toContain("项目资料索引");
+    expect(await fs.readFile(path.join(created.root, "AGENTS.md"), "utf8")).toContain("knowledge/CURRENT.json");
+  });
+
+  it("shows only the current analysis generation through stable logical paths", async () => {
+    const parent = await tempParent();
+    const created = await createWorkspace(parent, createDefaultProject());
+    await publishGeneration(created.root, {
+      generationId: "generation-current",
+      entities: [], events: [], assertions: [], relations: [], overrides: [],
+      materials: { "characters/林默.md": "# 林默\n\n当前状态：活跃。\n" }
+    });
+
+    const files = await listWorkspaceFiles(created.root);
+    expect(files.some((item) => item.path === "knowledge/current/characters/林默.md")).toBe(true);
+    expect(files.some((item) => item.path.includes("knowledge/generations/generation-current"))).toBe(false);
+    await expect(readWorkspaceFile(created.root, "knowledge/current/characters/林默.md"))
+      .resolves.toMatchObject({ content: expect.stringContaining("当前状态") });
+    const loaded = await loadWorkspace(created.root);
+    expect(loaded.data.analysis).toMatchObject({ status: "ready", generationId: "generation-current" });
+    expect(loaded.data.blueprint.characters.map((item) => item.name)).toContain("林默");
+    await expect(applyWorkspaceChanges(created.root, [{
+      path: "knowledge/CURRENT.json", action: "update", content: "{}"
+    }])).rejects.toThrow("分析结果");
   });
 
   it("applies multi-file candidates atomically and blocks stale candidates", async () => {
@@ -225,6 +326,37 @@ describe("workspace service", () => {
     expect(blocked.ok).toBe(false);
     expect(await fs.readFile(path.join(created.root, "STYLE.md"), "utf8")).toContain("外部文风");
     expect(await fs.readFile(path.join(created.root, "outline", "book.md"), "utf8")).toContain("灯塔之谜");
+  });
+
+  it("does not overwrite a file that appeared after a create candidate started", async () => {
+    const parent = await tempParent();
+    const created = await createWorkspace(parent, createDefaultProject());
+    const opened = await loadWorkspace(created.root);
+    const target = path.join(created.root, "chapters", "0002.md");
+    await fs.writeFile(target, "# 作者新章\n\n作者刚刚写下的正文。\n", "utf8");
+
+    const blocked = await applyWorkspaceChanges(created.root, [{
+      path: "chapters/0002.md", action: "create", content: "# 模型新章\n\n模型候选。\n"
+    }], { expectedRevisions: opened.revisions });
+
+    expect(blocked.ok).toBe(false);
+    expect(blocked.conflicts[0].path).toBe("chapters/0002.md");
+    expect(await fs.readFile(target, "utf8")).toContain("作者刚刚写下");
+  });
+
+  it("blocks a candidate when a selected context file changed even if the target is new", async () => {
+    const parent = await tempParent();
+    const created = await createWorkspace(parent, createDefaultProject());
+    const opened = await loadWorkspace(created.root);
+    await fs.writeFile(path.join(created.root, "AGENTS.md"), "# 作者刚刚改过的创作章程\n", "utf8");
+
+    const blocked = await applyWorkspaceChanges(created.root, [{
+      path: "chapters/0002.md", action: "create", content: "# 旧设定生成的正文\n"
+    }], { expectedRevisions: opened.revisions, guardPaths: ["AGENTS.md"] });
+
+    expect(blocked.ok).toBe(false);
+    expect(blocked.conflicts[0]).toMatchObject({ path: "AGENTS.md", contextChanged: true });
+    await expect(fs.access(path.join(created.root, "chapters", "0002.md"))).rejects.toThrow();
   });
 
   it("migrates a legacy manifest without overwriting newer ordinary files", async () => {

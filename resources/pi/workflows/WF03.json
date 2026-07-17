@@ -1,0 +1,15 @@
+{
+  "id": "WF03",
+  "version": "1.2.0",
+  "trigger": "author_correction",
+  "maxRetries": 2,
+  "writesGraph": true,
+  "nodes": [
+    { "id": "identify", "role": "R01", "required": true },
+    { "id": "override", "type": "program", "dependsOn": ["identify"], "required": true },
+    { "id": "recalculate", "role": "R12", "dependsOn": ["override"], "expand": "affectedTracks", "parallel": true, "required": true },
+    { "id": "materials", "role": "R13", "dependsOn": ["recalculate"], "required": true },
+    { "id": "publish", "type": "program", "dependsOn": ["materials"], "required": true }
+  ],
+  "writableFiles": ["knowledge/CURRENT.json", "knowledge/generations/**"]
+}

@@ -1,0 +1,14 @@
+{
+  "id": "WF06",
+  "version": "1.1.0",
+  "trigger": "plan_chapter",
+  "maxRetries": 2,
+  "writesGraph": false,
+  "nodes": [
+    { "id": "select", "role": "R14", "required": true },
+    { "id": "plan", "role": "R15", "dependsOn": ["select"], "required": true },
+    { "id": "review", "role": "R17", "dependsOn": ["plan"], "expand": "planReviewPerspectives", "parallel": true, "required": true },
+    { "id": "merge", "type": "program", "dependsOn": ["review"], "required": true }
+  ],
+  "writableFiles": ["outline/chapters/*.md"]
+}

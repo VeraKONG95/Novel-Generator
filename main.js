@@ -18,7 +18,15 @@ const {
   saveWorkspace
 } = require("./services/workspace-service");
 const { TaskManager } = require("./services/task-manager");
+const { WorkflowTaskRunner } = require("./services/workflow-task-runner");
 const { classifyTask } = require("./services/pi-prompts");
+const { AnalysisOrchestrator } = require("./services/analysis-orchestrator");
+const { UtilityAnalysisExecutor } = require("./services/analysis-worker-executor");
+const { readCurrentGeneration, readGraph, resolveEvidence } = require("./services/analysis/graph-store");
+const { selectWritingContext } = require("./services/analysis/context-selector");
+const { ChapterAnalysisQueue } = require("./services/analysis/chapter-analysis-queue");
+const { detectChangedChapterPaths } = require("./services/analysis/chapter-change-detector");
+const { shouldRetryWithFreshContext } = require("./services/fresh-context-retry");
 
 if (process.env.NOVAL_USER_DATA_DIR) {
   app.setPath("userData", path.resolve(process.env.NOVAL_USER_DATA_DIR));
@@ -30,11 +38,219 @@ const DRAFTS_DIR = () => path.join(app.getPath("userData"), "draft-projects");
 
 let mainWindow = null;
 let taskManager = null;
+let analysisOrchestrator = null;
+let analysisWorkerExecutor = null;
+let workflowTaskRunner = null;
 let workspaceWatcher = null;
 let workspaceWriteUntil = 0;
+const autoApplyingTaskIds = new Set();
+const chapterAnalysisQueue = new ChapterAnalysisQueue({
+  isBlocked: async (root) => Boolean(activeTaskAtWorkspace(root) || analysisOrchestrator?.getActiveStatus(root)),
+  start: async (root, paths) => {
+    const loaded = await loadWorkspace(root);
+    return startWorkspaceAnalysis(root, loaded.data, { workflowId: "WF02", input: { changedPaths: paths } });
+  }
+});
+
+function queueChapterAnalysis(root, paths) {
+  return chapterAnalysisQueue.enqueue(root, paths);
+}
+
+function activeTaskAtWorkspace(root) {
+  const active = taskManager?.activeTaskId ? taskManager.get(taskManager.activeTaskId) : null;
+  return active?.workspaceRoot && path.resolve(active.workspaceRoot) === path.resolve(String(root || "")) ? active : null;
+}
+
+async function drainChapterAnalysis(root) {
+  return chapterAnalysisQueue.drain(root);
+}
+
+function analysisChapters(project) {
+  return (project.chapters || []).map((chapter) => ({
+    id: chapter.id,
+    index: chapter.index,
+    title: chapter.title,
+    path: `chapters/${String(chapter.index).padStart(4, "0")}.md`,
+    content: chapter.content
+  }));
+}
+
+async function startWorkspaceAnalysis(root, project, { workflowId = "WF01", input = {}, maxConcurrency } = {}) {
+  if (!analysisOrchestrator) throw new Error("分析后台尚未准备完成。");
+  const settings = await readSettings();
+  if (settings.capabilityStatus !== "ready") {
+    throw new Error("请先配置并检查模型，再开始小说分析。");
+  }
+  const allChapters = analysisChapters(project);
+  let chapters = allChapters;
+  let workflowInput = input && typeof input === "object" ? { ...input } : {};
+  if (workflowId === "WF02" && Array.isArray(input.changedPaths) && input.changedPaths.length) {
+    const changed = new Set(input.changedPaths.map((item) => String(item).replace(/\\/g, "/")));
+    chapters = chapters.filter((chapter) => changed.has(chapter.path) || changed.has(chapter.id));
+    const existingPaths = new Set(allChapters.map((chapter) => chapter.path));
+    let deletedChapters = [];
+    try {
+      const current = await readCurrentGeneration(root);
+      deletedChapters = (current?.manifest?.coveredChapters || []).filter((chapter) =>
+        changed.has(String(chapter.sourcePath || "").replace(/\\/g, "/")) && !existingPaths.has(chapter.sourcePath)
+      );
+    } catch {
+      // A damaged current generation is reported by the workflow itself.
+    }
+    workflowInput = {
+      ...workflowInput,
+      changedPaths: Array.from(changed),
+      deletedChapters,
+      allChapters: allChapters.map(({ content, ...chapter }) => chapter)
+    };
+  }
+  return analysisOrchestrator.start({
+    workspaceRoot: root,
+    projectId: project.id,
+    workflowId,
+    settings,
+    maxConcurrency: maxConcurrency || settings.analysisMaxConcurrency || project.analysisSettings?.maxConcurrency || 4,
+    chapters,
+    input: workflowInput
+  });
+}
 
 function safeErrorMessage(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+async function autoApplyCandidateTask(task) {
+  if (!taskManager || autoApplyingTaskIds.has(task.id)) return;
+  autoApplyingTaskIds.add(task.id);
+  try {
+    const current = taskManager.get(task.id);
+    if (
+      !current ||
+      current.status !== "awaiting_confirmation" ||
+      current.result?.kind !== "candidate" ||
+      !current.workspaceRoot
+    ) return;
+
+    const rawChanges = Array.isArray(current.result.changes) ? current.result.changes : [];
+    const changes = await Promise.all(rawChanges.map(async (change) => {
+      let beforeContent = "";
+      try {
+        const previous = await readWorkspaceFile(current.workspaceRoot, change.path);
+        beforeContent = String(previous.content || "");
+      } catch {
+        beforeContent = "";
+      }
+      return { ...change, beforeContent };
+    }));
+
+    workspaceWriteUntil = Date.now() + 1500;
+    const guardPaths = current.workflowRunId
+      ? Object.keys(current.baseRevisions || {}).filter((relativePath) =>
+          relativePath === "AGENTS.md" ||
+          relativePath === "knowledge/CURRENT.json" ||
+          relativePath.startsWith("chapters/") ||
+          current.result?.contextSelection?.materialIds?.includes(relativePath)
+        )
+      : [];
+    const saveResult = await applyWorkspaceChanges(current.workspaceRoot, changes, {
+      expectedRevisions: current.baseRevisions || {},
+      guardPaths,
+      force: false
+    });
+    if (!saveResult.ok) {
+      const retryWithFreshContext = shouldRetryWithFreshContext({
+        conflicts: saveResult.conflicts,
+        workflowRunId: current.workflowRunId,
+        contextRetryCount: current.contextRetryCount,
+        analysisActive: Boolean(analysisOrchestrator?.getActiveStatus(current.workspaceRoot))
+      });
+      if (retryWithFreshContext) {
+        const loaded = await loadWorkspace(current.workspaceRoot);
+        const retrySettings = await readSettings();
+        const retryContext = await buildTaskContext(
+          loaded.data,
+          current.workspaceRoot,
+          current.target,
+          retrySettings,
+          [],
+          { taskType: current.taskType, instruction: current.instruction }
+        );
+        await taskManager.start({
+          taskType: current.taskType,
+          instruction: current.instruction,
+          target: current.target,
+          context: retryContext,
+          settings: retrySettings,
+          baseRevisions: loaded.revisions || {},
+          workspaceRoot: current.workspaceRoot,
+          projectId: current.projectId,
+          conversationId: current.conversationId,
+          conversationTitle: current.conversationTitle,
+          contextRetryCount: 1
+        });
+        await taskManager.decide(current.id, "reject", {
+          ...current.result,
+          changes,
+          contextChanged: true,
+          retriedWithFreshContext: true
+        });
+        return;
+      }
+      await taskManager.updateTask(
+        current.id,
+        {
+          status: "awaiting_confirmation",
+          error: "项目文件在生成期间发生了变化，本次修改没有自动写入。",
+          result: { ...current.result, changes, conflicts: saveResult.conflicts || [], autoApplyBlocked: true },
+          finishedAt: ""
+        },
+        { type: "error", status: "failed", text: "文件变化导致自动写入暂停" }
+      );
+      return;
+    }
+
+    if (current.taskType === "import_novel" && saveResult.data) {
+      workspaceWriteUntil = Date.now() + 1500;
+      const confirmedProject = { ...saveResult.data, importStatus: "confirmed" };
+      const confirmationResult = await saveWorkspace(current.workspaceRoot, confirmedProject, {
+        expectedRevisions: saveResult.revisions || {},
+        force: false
+      });
+      if (!confirmationResult.ok) {
+        throw new Error("作品档案已经生成，但确认状态保存失败，请重新打开项目后再试。");
+      }
+    }
+
+    const changedChapterPaths = changes
+      .map((change) => String(change.path || "").replace(/\\/g, "/"))
+      .filter((relativePath) => /^chapters\/[^/]+\.md$/i.test(relativePath));
+    if (changedChapterPaths.length) {
+      queueChapterAnalysis(current.workspaceRoot, changedChapterPaths);
+      await drainChapterAnalysis(current.workspaceRoot);
+    }
+
+    await taskManager.decide(current.id, "accept", {
+      ...current.result,
+      changes,
+      autoAppliedAt: new Date().toISOString()
+    });
+  } catch (error) {
+    const current = taskManager?.get(task.id);
+    if (current?.status === "awaiting_confirmation") {
+      await taskManager.updateTask(
+        current.id,
+        {
+          status: "failed",
+          error: `本次修改没有自动写入：${safeErrorMessage(error)}`,
+          finishedAt: new Date().toISOString()
+        },
+        { type: "error", status: "failed", text: safeErrorMessage(error) }
+      );
+    }
+  } finally {
+    autoApplyingTaskIds.delete(task.id);
+    if (task.workspaceRoot) void drainChapterAnalysis(task.workspaceRoot);
+  }
 }
 
 async function ensureParentDir(filePath) {
@@ -159,6 +375,9 @@ async function startWorkspaceWatcher(root) {
     ignored: [
       /(^|[/\\])\.noval[/\\](?:\.stage-|\.backup-)/,
       /(^|[/\\])\.noval[/\\]tasks[/\\]/,
+      /(^|[/\\])\.noval[/\\]analysis[/\\]/,
+      /(^|[/\\])knowledge[/\\]generations[/\\]/,
+      /(^|[/\\])knowledge[/\\]\.CURRENT-.*\.json$/,
       /(^|[/\\])\.noval[/\\]index\.json$/,
       /(^|[/\\])\.noval[/\\]transaction\.json$/
     ],
@@ -245,20 +464,61 @@ function fitTaskContext(context, settings) {
   return next;
 }
 
-async function buildTaskContext(project, workspaceRoot, target, settings, conversationHistory = []) {
+async function buildTaskContext(project, workspaceRoot, target, settings, conversationHistory = [], request = {}) {
   const documents = workspaceRoot
     ? await listDocuments(workspaceRoot)
     : virtualDocuments(project);
+  let contextSelection = null;
+  if (workspaceRoot) {
+    try {
+      const generation = await readCurrentGeneration(workspaceRoot);
+      if (generation) {
+        const readMaterial = async (relativePath) => {
+          try { return await fs.readFile(path.join(generation.materialsRoot, relativePath), "utf8"); }
+          catch { return ""; }
+        };
+        contextSelection = selectWritingContext({
+          goal: request.instruction || "",
+          targetCharacterIds: target?.characterIds || target?.participantCharacterIds || [],
+          targetChapterIndex: target?.chapterIndex || ((project.chapters?.at(-1)?.index || 0) + 1),
+          contextWindow: settings?.contextWindow,
+          currentStage: await readMaterial("outline/stages/current.md"),
+          style: await readMaterial("STYLE.md"),
+          entities: generation.entities,
+          events: generation.events,
+          assertions: generation.assertions,
+          relations: generation.relations,
+          overrides: generation.overrides,
+          storylines: generation.entities.filter((item) => ["storyline", "故事线"].includes(item.type)),
+          hooks: generation.entities.filter((item) => ["hook", "伏笔"].includes(item.type)),
+          chapters: project.chapters
+        });
+        documents.unshift({
+          id: "analysis:writing-context",
+          title: "本次创作的图谱材料包",
+          content: JSON.stringify(contextSelection.sections, null, 2)
+        });
+      }
+    } catch {
+      // A missing graph is handled by task gating; ordinary legacy projects keep their old context path.
+    }
+  }
   return fitTaskContext({
     agents: String(project.agents || "尚未建立创作章程。"),
     materials: {
       project: { id: project.id, title: project.title },
       target
     },
-    memory: {},
-    recentChapters: [],
+    memory: contextSelection?.sections || {},
+    recentChapters: contextSelection?.sections?.adjacentChapters || [],
     conversationHistory: Array.isArray(conversationHistory) ? conversationHistory.slice(-40) : [],
-    documents
+    documents,
+    contextSelection: contextSelection ? {
+      tokenBudget: contextSelection.tokenBudget,
+      estimatedTokens: contextSelection.estimatedTokens,
+      selectedEntityIds: contextSelection.selectedEntityIds,
+      materialIds: ["analysis:writing-context"]
+    } : null
   }, settings);
 }
 
@@ -515,11 +775,11 @@ ipcMain.handle("workspace:importLegacy", async () => {
   }
 });
 
-ipcMain.handle("workspace:importNovel", async (_event, { project }) => {
+ipcMain.handle("workspace:importNovel", async (event, { project }) => {
   const source = await dialog.showOpenDialog({
     title: "选择已有小说正文",
     properties: ["openFile"],
-    filters: [{ name: "文本或 Markdown", extensions: ["txt", "md", "markdown"] }]
+    filters: [{ name: "小说文件", extensions: ["txt", "md", "markdown", "pdf"] }]
   });
   if (source.canceled || !source.filePaths[0]) return { canceled: true };
   const destination = await dialog.showOpenDialog({
@@ -529,13 +789,27 @@ ipcMain.handle("workspace:importNovel", async (_event, { project }) => {
   if (destination.canceled || !destination.filePaths[0]) return { canceled: true };
   try {
     workspaceWriteUntil = Date.now() + 1500;
-    const result = await importNovel(destination.filePaths[0], source.filePaths[0], project);
+    const result = await importNovel(destination.filePaths[0], source.filePaths[0], project, {
+      onProgress: (progress) => {
+        if (!event.sender.isDestroyed()) event.sender.send("workspace:importProgress", progress);
+      }
+    });
     await startWorkspaceWatcher(result.root);
+    let analysis = null;
+    const modelSettings = await readSettings();
+    if (modelSettings.capabilityStatus === "ready") {
+      analysis = await startWorkspaceAnalysis(result.root, result.data, { workflowId: "WF01" });
+    }
     return {
       canceled: false,
       filePath: result.root,
       ...result,
-      import: { sourcePath: source.filePaths[0], requiresArchiveConfirmation: true }
+      import: {
+        sourcePath: source.filePaths[0],
+        requiresArchiveConfirmation: false,
+        ...(result.sourceInfo || {})
+      },
+      analysis
     };
   } catch (error) {
     return { canceled: false, error: safeErrorMessage(error) };
@@ -669,6 +943,150 @@ ipcMain.handle("model:probe", async (_event, settings) => {
   }
 });
 
+ipcMain.handle("analysis:start", async (_event, payload) => {
+  try {
+    const workflowId = payload.workflowId || "WF01";
+    const activeTask = activeTaskAtWorkspace(payload.root);
+    const activeAnalysis = analysisOrchestrator?.getActiveStatus(payload.root);
+    if (activeTask || activeAnalysis) {
+      if (workflowId === "WF02") {
+        const queuedPaths = queueChapterAnalysis(payload.root, payload.input?.changedPaths || []);
+        return { ok: true, data: null, queued: true, queuedPaths };
+      }
+      return { ok: false, error: "当前项目正在创作或更新图谱，请等待完成后再开始新的分析。" };
+    }
+    const loaded = await loadWorkspace(payload.root);
+    const run = await startWorkspaceAnalysis(payload.root, loaded.data, {
+      workflowId,
+      input: payload.input || {},
+      maxConcurrency: payload.maxConcurrency
+    });
+    return { ok: true, data: run };
+  } catch (error) {
+    return { ok: false, error: safeErrorMessage(error) };
+  }
+});
+
+ipcMain.handle("analysis:status", async (_event, { root, runId } = {}) => {
+  try {
+    let current = runId
+      ? analysisOrchestrator?.getStatus(runId)
+      : analysisOrchestrator?.getActiveStatus(root);
+    const latest = current ? null : await analysisOrchestrator?.readLatestStatus(root);
+    let stalePaths = [];
+    if (!current && root && (!latest || ["ready", "degraded"].includes(latest.status))) {
+      try {
+        const [generation, loaded] = await Promise.all([readCurrentGeneration(root), loadWorkspace(root)]);
+        stalePaths = await detectChangedChapterPaths(root, generation, analysisChapters(loaded.data));
+        if (stalePaths.length) {
+          queueChapterAnalysis(root, stalePaths);
+          await drainChapterAnalysis(root);
+          current = analysisOrchestrator?.getActiveStatus(root);
+        }
+      } catch {
+        // Existing status and graph errors are reported through their dedicated paths.
+      }
+    }
+    let data = current || latest;
+    if (!current && data?.status === "analyzing") {
+      data = { ...data, status: "paused", stage: "应用重启后等待继续", recovered: true };
+    }
+    if (!current && stalePaths.length && data && ["ready", "degraded"].includes(data.status)) {
+      data = {
+        ...data,
+        status: "raw_imported",
+        runId: "",
+        workflowId: "WF01",
+        stage: "正文变化等待局部更新",
+        blockingGaps: ["正文已经变化，关系图谱尚未更新"],
+        recovered: false
+      };
+    }
+    return { ok: true, data: data || null };
+  } catch (error) {
+    return { ok: false, error: safeErrorMessage(error), data: null };
+  }
+});
+
+ipcMain.handle("analysis:pause", async (_event, { runId }) => {
+  try {
+    return { ok: true, data: await analysisOrchestrator.pause(runId) };
+  } catch (error) {
+    return { ok: false, error: safeErrorMessage(error) };
+  }
+});
+
+ipcMain.handle("analysis:resume", async (_event, { root, runId }) => {
+  try {
+    const active = analysisOrchestrator.getStatus(runId);
+    if (active) return { ok: true, data: await analysisOrchestrator.resume(runId) };
+    const loaded = await loadWorkspace(root);
+    const settings = await readSettings();
+    const run = await analysisOrchestrator.resumeLatest({
+      workspaceRoot: root,
+      settings,
+      chapters: analysisChapters(loaded.data)
+    });
+    return { ok: true, data: run };
+  } catch (error) {
+    return { ok: false, error: safeErrorMessage(error) };
+  }
+});
+
+ipcMain.handle("analysis:cancel", async (_event, { runId }) => {
+  try {
+    const run = await analysisOrchestrator.cancel(runId);
+    return run ? { ok: true, data: run } : { ok: false, error: "分析运行不存在。" };
+  } catch (error) {
+    return { ok: false, error: safeErrorMessage(error) };
+  }
+});
+
+ipcMain.handle("analysis:retryFailed", async (_event, { root, workflowId, input } = {}) => {
+  try {
+    const previous = await analysisOrchestrator.readLatestStatus(root);
+    const previousRequest = await analysisOrchestrator.readLatestRequest(root);
+    const loaded = await loadWorkspace(root);
+    const suppliedInput = input && typeof input === "object" && Object.keys(input).length ? input : null;
+    const run = await startWorkspaceAnalysis(root, loaded.data, {
+      workflowId: workflowId || previousRequest?.workflowId || previous?.workflowId || "WF01",
+      input: suppliedInput || previousRequest?.input || {},
+      maxConcurrency: previousRequest?.maxConcurrency
+    });
+    return { ok: true, data: run };
+  } catch (error) {
+    return { ok: false, error: safeErrorMessage(error) };
+  }
+});
+
+ipcMain.handle("analysis:setConcurrency", async (_event, { runId, maxConcurrency }) => {
+  try {
+    const data = analysisOrchestrator.setConcurrency(runId, maxConcurrency);
+    const settings = await readSettings();
+    await ensureParentDir(SETTINGS_PATH());
+    await fs.writeFile(SETTINGS_PATH(), JSON.stringify({ ...settings, analysisMaxConcurrency: data.maxConcurrency }, null, 2), "utf8");
+    return { ok: true, data };
+  } catch (error) {
+    return { ok: false, error: safeErrorMessage(error) };
+  }
+});
+
+ipcMain.handle("graph:get", async (_event, { root }) => {
+  try {
+    return { ok: true, data: await readGraph(root) };
+  } catch (error) {
+    return { ok: false, error: safeErrorMessage(error), data: null };
+  }
+});
+
+ipcMain.handle("graph:resolveEvidence", async (_event, { root, ref }) => {
+  try {
+    return { ok: true, data: await resolveEvidence(root, ref) };
+  } catch (error) {
+    return { ok: false, error: safeErrorMessage(error), data: null };
+  }
+});
+
 ipcMain.handle("task:start", async (_event, payload) => {
   if (!taskManager) return { ok: false, error: "Pi 后台尚未准备完成。" };
   try {
@@ -676,11 +1094,25 @@ ipcMain.handle("task:start", async (_event, payload) => {
     project.agents = String(payload.project?.agents || "");
     project.creationMode = String(payload.project?.creationMode || "平衡型");
     const taskType = payload.taskType || classifyTask(payload.instruction, payload.target?.docType);
+    if (payload.workspaceRoot) {
+      const activeAnalysis = analysisOrchestrator?.getActiveStatus(payload.workspaceRoot);
+      const latestAnalysis = activeAnalysis || await analysisOrchestrator?.readLatestStatus(payload.workspaceRoot);
+      const blocksCreation = activeAnalysis && ["analyzing", "paused"].includes(activeAnalysis.status);
+      const projectAnalysisBlocks = ["raw_imported", "analyzing", "paused", "failed", "cancelled"]
+        .includes(String(project.analysis?.status || project.importStatus || "")) &&
+        !["ready", "degraded"].includes(latestAnalysis?.status);
+      if (blocksCreation || projectAnalysisBlocks) {
+        return { ok: false, error: "小说分析完成前只能查看文件和图谱，暂时不能开始新的创作任务。" };
+      }
+    }
     const taskSettings = await readSettings();
     if (taskSettings.capabilityStatus !== "ready") {
       return { ok: false, error: "当前模型尚未通过完整创作能力检查。" };
     }
-    const context = await buildTaskContext(project, payload.workspaceRoot || "", payload.target, taskSettings, payload.conversationHistory);
+    const context = await buildTaskContext(project, payload.workspaceRoot || "", payload.target, taskSettings, payload.conversationHistory, {
+      taskType,
+      instruction: payload.instruction
+    });
     const task = await taskManager.start({
       taskType,
       instruction: payload.instruction,
@@ -717,7 +1149,10 @@ ipcMain.handle("task:answer", async (_event, payload) => {
     if (settings.capabilityStatus !== "ready") {
       return { ok: false, error: "当前模型尚未通过完整创作能力检查。" };
     }
-    const context = await buildTaskContext(project, payload.workspaceRoot || "", payload.target, settings, payload.conversationHistory);
+    const context = await buildTaskContext(project, payload.workspaceRoot || "", payload.target, settings, payload.conversationHistory, {
+      taskType: payload.taskType,
+      instruction: payload.answer
+    });
     const task = await taskManager.answer(payload.taskId, payload.answer, { context, settings });
     return { ok: true, task };
   } catch (error) {
@@ -728,7 +1163,11 @@ ipcMain.handle("task:answer", async (_event, payload) => {
 ipcMain.handle("task:list", async (_event, { projectId, workspaceRoot }) => {
   try {
     if (workspaceRoot) await taskManager?.loadWorkspaceTasks(workspaceRoot);
-    return { ok: true, data: taskManager?.list(projectId) || [] };
+    const tasks = taskManager?.list(projectId) || [];
+    tasks
+      .filter((task) => task.status === "awaiting_confirmation" && task.result?.kind === "candidate" && !task.result?.autoApplyBlocked)
+      .forEach((task) => void autoApplyCandidateTask(task));
+    return { ok: true, data: tasks };
   } catch (error) {
     return { ok: false, error: safeErrorMessage(error), data: [] };
   }
@@ -882,13 +1321,42 @@ ipcMain.handle("export:document", async (_event, { format, defaultName, content 
 });
 
 app.whenReady().then(() => {
+  analysisWorkerExecutor = new UtilityAnalysisExecutor({
+    utilityProcess,
+    workerPath: path.join(__dirname, "services", "pi-analysis-worker.mjs")
+  });
+  analysisOrchestrator = new AnalysisOrchestrator({
+    executeJob: (job, execution) => analysisWorkerExecutor.execute(job, execution),
+    onEvent: (payload) => {
+      if (payload?.category !== "creative_task" && mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send("analysis:event", payload);
+      }
+      if (["ready", "degraded", "failed", "cancelled"].includes(payload?.status)) {
+        const run = analysisOrchestrator?.runs?.get(payload.runId);
+        if (run?.workspaceRoot) setTimeout(() => { void drainChapterAnalysis(run.workspaceRoot); }, 0);
+      }
+    }
+  });
+  workflowTaskRunner = new WorkflowTaskRunner({ orchestrator: analysisOrchestrator });
   taskManager = new TaskManager({
     utilityProcess,
     workerPath: path.join(__dirname, "services", "pi-worker.mjs"),
     userDataDir: app.getPath("userData"),
+    workflowRunner: workflowTaskRunner,
     onEvent: (payload) => {
+      if (
+        payload?.task?.status === "awaiting_confirmation" &&
+        payload?.task?.result?.kind === "candidate" &&
+        !payload?.task?.result?.autoApplyBlocked
+      ) {
+        void autoApplyCandidateTask(payload.task);
+        return;
+      }
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send("task:event", payload);
+      }
+      if (payload?.task?.workspaceRoot && ["completed", "stopped", "failed", "interrupted", "rejected", "abandoned"].includes(payload.task.status)) {
+        setTimeout(() => { void drainChapterAnalysis(payload.task.workspaceRoot); }, 0);
       }
     }
   });
@@ -904,6 +1372,7 @@ app.whenReady().then(() => {
 app.on("before-quit", () => {
   if (workspaceWatcher) void workspaceWatcher.close();
   if (taskManager?.worker) taskManager.worker.kill();
+  if (analysisWorkerExecutor) void analysisWorkerExecutor.close();
 });
 
 app.on("window-all-closed", () => {

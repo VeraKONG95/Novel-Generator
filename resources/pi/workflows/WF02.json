@@ -1,0 +1,21 @@
+{
+  "id": "WF02",
+  "version": "1.4.0",
+  "trigger": "chapter_changed",
+  "maxRetries": 2,
+  "writesGraph": true,
+  "nodes": [
+    { "id": "extract", "role": "R03", "expand": "changedChapters", "parallel": true, "required": true },
+    { "id": "unify", "role": "R04", "dependsOn": ["extract"], "required": true },
+    { "id": "impact", "type": "program", "dependsOn": ["unify"], "required": true },
+    { "id": "character_states", "role": "R06", "dependsOn": ["impact"], "expand": "affectedCharacters", "parallel": true, "required": true },
+    { "id": "relations", "role": "R07", "dependsOn": ["impact"], "expand": "affectedPairs", "parallel": true, "required": true },
+    { "id": "storylines", "role": "R08", "dependsOn": ["impact"], "expand": "affectedStorylines", "parallel": true, "required": false },
+    { "id": "hooks", "role": "R09", "dependsOn": ["impact"], "expand": "affectedHooks", "parallel": true, "required": false },
+    { "id": "knowledge", "role": "R11", "dependsOn": ["impact"], "expand": "affectedCharacters", "parallel": true, "required": true },
+    { "id": "check", "role": "R12", "dependsOn": ["character_states", "relations", "storylines", "hooks", "knowledge"], "required": true },
+    { "id": "materials", "role": "R13", "dependsOn": ["check"], "required": true },
+    { "id": "publish", "type": "program", "dependsOn": ["materials"], "required": true }
+  ],
+  "writableFiles": ["knowledge/CURRENT.json", "knowledge/generations/**"]
+}

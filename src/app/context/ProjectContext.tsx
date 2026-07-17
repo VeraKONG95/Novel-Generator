@@ -16,7 +16,8 @@ import {
   RecentProjectSummary,
   RecoveryNotice,
   WorkspaceConflict,
-  WorkspaceRevision
+  WorkspaceRevision,
+  AnalysisRunStatus
 } from '../types';
 
 interface OpenProjectResult {
@@ -27,6 +28,15 @@ interface OpenProjectResult {
   data?: NovalProject;
   revisions?: Record<string, WorkspaceRevision | null>;
   conflicts?: WorkspaceConflict[];
+  import?: {
+    sourcePath?: string;
+    requiresArchiveConfirmation?: boolean;
+    format?: string;
+    pageCount?: number;
+    pagesWithoutText?: number[];
+    warnings?: string[];
+  };
+  analysis?: AnalysisRunStatus | null;
   meta?: {
     migrated?: boolean;
   };
@@ -97,6 +107,54 @@ const DEFAULT_SETTINGS: ModelSettings = {
   capabilityCheckedAt: '',
   capabilityMessage: ''
 };
+
+interface ExternalWorkspaceRefreshOptions {
+  root: string;
+  paths: unknown[];
+  hasUnsavedChanges: boolean;
+  reloadWorkspace: (root: string) => Promise<OpenProjectResult>;
+  startAnalysis?: (payload: {
+    root: string;
+    workflowId: 'WF02';
+    input: { changedPaths: string[] };
+  }) => Promise<unknown>;
+}
+
+export async function refreshExternalWorkspace({
+  root,
+  paths,
+  hasUnsavedChanges,
+  reloadWorkspace,
+  startAnalysis
+}: ExternalWorkspaceRefreshOptions) {
+  if (hasUnsavedChanges) {
+    return {
+      skipped: 'unsaved' as const,
+      reloadResult: null,
+      changedChapterPaths: []
+    };
+  }
+
+  const reloadResult = await reloadWorkspace(root);
+  const changedChapterPaths = paths
+    .map((item) => String(item || '').replace(/\\/g, '/').replace(/^\.\//, ''))
+    .filter((item) => /^chapters\/[^/]+\.md$/i.test(item));
+
+  let analysisResult: unknown = null;
+  if (reloadResult?.ok && reloadResult.data && changedChapterPaths.length && startAnalysis) {
+    try {
+      analysisResult = await startAnalysis({
+        root,
+        workflowId: 'WF02',
+        input: { changedPaths: changedChapterPaths }
+      });
+    } catch (error) {
+      analysisResult = { ok: false, error };
+    }
+  }
+
+  return { skipped: null, reloadResult, changedChapterPaths, analysisResult };
+}
 
 export function ProjectProvider({ children }: { children: React.ReactNode }) {
   const [currentProject, setCurrentProject] = useState<NovalProject | null>(null);
@@ -220,7 +278,13 @@ export function ProjectProvider({ children }: { children: React.ReactNode }) {
         return;
       }
       if (window.novalAPI?.reloadWorkspace) {
-        void window.novalAPI.reloadWorkspace(payload.root).then((result) => {
+        void refreshExternalWorkspace({
+          root: payload.root,
+          paths,
+          hasUnsavedChanges,
+          reloadWorkspace: window.novalAPI.reloadWorkspace,
+          startAnalysis: window.novalAPI.startAnalysis
+        }).then(({ reloadResult: result }) => {
           if (!result?.ok || !result.data) return;
           setCurrentProject(result.data);
           setWorkspaceRevisions(result.revisions || {});
